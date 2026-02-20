@@ -15,7 +15,7 @@ import httpx
 from ..base import BaseLLMProvider, InferenceRequest, InferenceResponse
 
 _DEFAULT_BASE_URL = "http://localhost:11434"
-_DEFAULT_MODEL = "llama3"
+_DEFAULT_MODEL = "llama3.1:8b"
 # Ollama /api/generate timeout — models can be slow on first load
 _TIMEOUT_SECONDS = 180.0
 
@@ -79,8 +79,23 @@ class OllamaProvider(BaseLLMProvider):
             model=self._model,
         )
 
+    def is_available_sync(self) -> bool:
+        """
+        Synchronous health-check using httpx's sync client.
+
+        Used by _resolve_provider() at router construction time, which runs
+        before any async event loop is active. Avoids the
+        asyncio.get_event_loop().run_until_complete() pattern that raises
+        RuntimeError when called from within an already-running loop.
+        """
+        try:
+            r = httpx.get(f"{self._base_url}/api/tags", timeout=5.0)
+            return r.status_code == 200
+        except Exception:
+            return False
+
     async def is_available(self) -> bool:
-        """Health-check: True if Ollama daemon is reachable."""
+        """Async health-check: True if Ollama daemon is reachable."""
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.get(f"{self._base_url}/api/tags")

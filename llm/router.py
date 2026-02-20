@@ -52,13 +52,14 @@ def _resolve_provider() -> BaseLLMProvider:
         from .providers.ollama_provider import OllamaProvider
         return OllamaProvider()
 
-    # Auto-detect: try Ollama first (synchronous check via asyncio.run in thread)
+    # Auto-detect: try Ollama first using the synchronous health-check.
+    # is_available_sync() uses httpx's sync client so it never touches the
+    # event loop — safe to call at router construction time regardless of
+    # whether an async loop is already running.
     try:
         from .providers.ollama_provider import OllamaProvider
         provider = OllamaProvider()
-        # Quick synchronous availability check during startup
-        available = asyncio.get_event_loop().run_until_complete(provider.is_available())
-        if available:
+        if provider.is_available_sync():
             logger.info("Auto-selected Ollama provider at %s", provider._base_url)
             return provider
     except Exception:
