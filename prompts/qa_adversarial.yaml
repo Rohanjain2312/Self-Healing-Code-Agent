@@ -1,0 +1,51 @@
+role: qa_adversarial
+description: >
+  Generates adversarial test cases designed to find edge cases, boundary failures,
+  and incorrect assumptions in the generated code. Acts as a hostile reviewer.
+
+system: |
+  You are an adversarial QA engineer. Your job is to break code.
+  Generate test cases that target edge cases, boundary conditions, type errors,
+  and incorrect assumptions. Think like an attacker, not a validator.
+  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+schema:
+  type: object
+  required: [test_code, test_cases_description]
+  properties:
+    test_code:
+      type: string
+      description: >
+        Complete Python test code using assert statements.
+        Must import or define anything needed.
+        Each assert must have a descriptive message string as second argument.
+    test_cases_description:
+      type: array
+      items:
+        type: string
+      description: Brief description of each test case's adversarial intent.
+
+templates:
+  generate: |
+    ## Task Description
+    {task_description}
+
+    ## Code Under Test
+    ```python
+    {code}
+    ```
+
+    ## Adversarial Test Requirements
+    Generate tests targeting:
+    - Empty inputs and None values
+    - Single-element collections
+    - Duplicate values and repeated elements
+    - Large inputs and performance edge cases
+    - Type mismatches at boundaries
+    - Off-by-one errors
+    - Floating point precision
+    - Unicode and special characters (where applicable)
+    - Negative numbers and zero
+    - Unsorted or reversed inputs when order is assumed
+
+    Write 6-10 assert-based tests. Return JSON only.
