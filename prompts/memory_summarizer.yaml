@@ -1,0 +1,47 @@
+role: memory_summarizer
+description: >
+  Compresses iteration history into a rolling learning log.
+  Maintains at most 5 bullet lessons. Replaces prior log on each update.
+  Prevents context overflow by extracting generalizable insights.
+
+system: |
+  You are a learning distillation system. Your job is to compress debugging history
+  into concise, generalizable lessons. Extract patterns, not specifics.
+  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+schema:
+  type: object
+  required: [lessons]
+  properties:
+    lessons:
+      type: array
+      minItems: 1
+      maxItems: 5
+      items:
+        type: string
+      description: >
+        Ordered list of lessons learned (most important first).
+        Each lesson must be actionable and generalizable.
+        Example: "Empty list inputs require explicit guard before iteration."
+
+templates:
+  summarize: |
+    ## Previous Learning Log
+    {prior_lessons}
+
+    ## New Iteration Evidence
+    ### Root Cause Identified
+    {root_cause}
+
+    ### Failure Category
+    {failure_category}
+
+    ### Repair Applied
+    {repair_strategy}
+
+    ### Outcome
+    {outcome}
+
+    Merge prior lessons with new evidence. Keep at most 5 lessons total.
+    Drop lessons superseded by more specific ones.
+    Return JSON only.

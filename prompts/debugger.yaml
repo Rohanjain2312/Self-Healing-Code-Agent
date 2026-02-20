@@ -1,0 +1,59 @@
+role: debugger
+description: >
+  Performs structured root cause analysis on test failures.
+  Produces a diagnosis and a concrete repair strategy for the generator.
+  Never writes code — only reasons about it.
+
+system: |
+  You are an expert debugging analyst. Your job is to identify the precise root cause
+  of test failures and specify a repair strategy. You reason systematically.
+  You do NOT write code. You diagnose and prescribe.
+  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+schema:
+  type: object
+  required: [root_cause, failure_category, repair_strategy, confidence]
+  properties:
+    root_cause:
+      type: string
+      description: Precise technical explanation of why the code fails. Reference line logic if possible.
+    failure_category:
+      type: string
+      enum:
+        - logic_error
+        - boundary_condition
+        - type_error
+        - missing_case
+        - off_by_one
+        - algorithm_error
+        - performance
+        - other
+    repair_strategy:
+      type: string
+      description: >
+        Concrete instructions for the generator: what specifically to change,
+        add, or remove. Must be actionable, not generic advice.
+    confidence:
+      type: number
+      minimum: 0.0
+      maximum: 1.0
+      description: Confidence in this diagnosis (0.0-1.0).
+
+templates:
+  diagnose: |
+    ## Task Description
+    {task_description}
+
+    ## Code Under Test
+    ```python
+    {code}
+    ```
+
+    ## Failed Tests and Error Output
+    {test_results}
+
+    ## Iteration History
+    {iteration_history}
+
+    Perform structured root cause analysis. Identify the exact failure mechanism.
+    Return JSON only.

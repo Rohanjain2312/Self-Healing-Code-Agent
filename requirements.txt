@@ -1,0 +1,34 @@
+# Core agent framework
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# Schema validation
+pydantic>=2.0.0
+jsonschema>=4.0.0
+
+# Async utilities
+anyio>=4.0.0
+httpx>=0.27.0
+
+# YAML prompt loading
+pyyaml>=6.0.0
+
+# HuggingFace inference (lazy-loaded — GPU environments only)
+# transformers>=4.40.0
+# torch>=2.1.0
+# accelerate>=0.27.0
+# bitsandbytes>=0.43.0       # 4-bit quantization for RAM efficiency
+
+# Ollama client (local dev)
+ollama>=0.2.0
+
+# Demo UI
+gradio>=4.36.0
+
+# Evaluation and visualization
+matplotlib>=3.8.0
+numpy>=1.26.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

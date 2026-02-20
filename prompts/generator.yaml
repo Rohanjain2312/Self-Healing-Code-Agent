@@ -1,0 +1,54 @@
+role: generator
+description: >
+  Produces a Python solution for the given task.
+  On repair cycles, applies minimal targeted modifications
+  guided by the debugger's diagnosis.
+
+system: |
+  You are an expert Python engineer. Your only job is to write correct, clean Python code.
+  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+schema:
+  type: object
+  required: [code, explanation]
+  properties:
+    code:
+      type: string
+      description: Complete, runnable Python source. Must define the requested function/class.
+    explanation:
+      type: string
+      description: One-sentence summary of the approach chosen.
+
+templates:
+  initial: |
+    ## Task
+    {task_description}
+
+    ## Prior Learning
+    {learning_log}
+
+    Write a complete Python solution. Return JSON only.
+
+  repair: |
+    ## Task
+    {task_description}
+
+    ## Current Code (DO NOT rewrite from scratch — apply minimal fixes only)
+    ```python
+    {current_code}
+    ```
+
+    ## Failure Evidence
+    {test_results}
+
+    ## Root Cause Diagnosis
+    {root_cause}
+
+    ## Repair Strategy
+    {repair_strategy}
+
+    ## Prior Learning
+    {learning_log}
+
+    Apply only the changes needed to fix the identified root cause.
+    Return JSON only.
