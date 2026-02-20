@@ -16,8 +16,9 @@ from ..base import BaseLLMProvider, InferenceRequest, InferenceResponse
 
 _DEFAULT_BASE_URL = "http://localhost:11434"
 _DEFAULT_MODEL = "llama3.1:8b"
-# Ollama /api/generate timeout — models can be slow on first load
-_TIMEOUT_SECONDS = 180.0
+# CPU inference on an 8B model can take several minutes per request.
+# 600s (10 min) gives ample headroom; override with OLLAMA_TIMEOUT env var.
+_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_TIMEOUT", "600"))
 
 
 class OllamaProvider(BaseLLMProvider):
@@ -56,7 +57,10 @@ class OllamaProvider(BaseLLMProvider):
             },
         }
 
-        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+        # Use separate connect vs read timeouts: connect must be fast,
+        # but read can be very long on CPU inference (minutes for 8B models).
+        timeout_config = httpx.Timeout(connect=10.0, read=_TIMEOUT_SECONDS, write=30.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=timeout_config) as client:
             try:
                 response = await client.post(
                     f"{self._base_url}/api/generate",
@@ -68,6 +72,12 @@ class OllamaProvider(BaseLLMProvider):
                 raise RuntimeError(
                     f"Ollama not reachable at {self._base_url}. "
                     "Ensure `ollama serve` is running."
+                ) from exc
+            except httpx.ReadTimeout as exc:
+                raise RuntimeError(
+                    f"Ollama read timeout after {_TIMEOUT_SECONDS}s for model '{self._model}'. "
+                    "The model may be under load. Set OLLAMA_TIMEOUT env var to increase the limit "
+                    "or switch to a smaller model via OLLAMA_MODEL."
                 ) from exc
 
         return InferenceResponse(
