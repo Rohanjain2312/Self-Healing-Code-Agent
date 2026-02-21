@@ -6,18 +6,31 @@ description: >
 
 system: |
   You are an expert Python engineer. Your only job is to write correct, clean Python code.
-  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+  You MUST respond with ONLY a JSON object. No explanation text before or after. No markdown fences.
+  The JSON object MUST have exactly this structure:
+
+  {"code": "<complete runnable Python source>", "explanation": "<one sentence>"}
+
+  CORRECT example:
+  {"code": "def add(a, b):\n    return a + b\n", "explanation": "Returns the sum of two numbers."}
+
+  WRONG examples (never do these):
+  - Wrapping output in ```json ... ```
+  - Adding any text before or after the JSON
+  - Nesting dicts or lists inside "code" — "code" must be a plain Python source string
+  - Omitting the "code" key
 
 schema:
   type: object
-  required: [code, explanation]
+  required: [code]
   properties:
     code:
       type: string
-      description: Complete, runnable Python source. Must define the requested function/class.
+      description: Complete runnable Python source as a plain string. Not a dict or nested structure.
     explanation:
       type: string
-      description: One-sentence summary of the approach chosen.
+      description: One-sentence summary. Optional.
 
 templates:
   initial: |
@@ -27,21 +40,24 @@ templates:
     ## Prior Learning
     {learning_log}
 
-    Write a complete Python solution. Return JSON only.
+    Write a complete Python solution.
+
+    Respond with ONLY this JSON object (no other text):
+    {{"code": "<your complete Python source>", "explanation": "<one sentence>"}}
 
   repair: |
     ## Task
     {task_description}
 
-    ## Current Code (DO NOT rewrite from scratch — apply minimal fixes only)
+    ## Current Code (apply minimal fixes only — do NOT rewrite from scratch)
     ```python
     {current_code}
     ```
 
-    ## Failure Evidence
+    ## Test Failures
     {test_results}
 
-    ## Root Cause Diagnosis
+    ## Root Cause
     {root_cause}
 
     ## Repair Strategy
@@ -50,5 +66,7 @@ templates:
     ## Prior Learning
     {learning_log}
 
-    Apply only the changes needed to fix the identified root cause.
-    Return JSON only.
+    Apply only the changes needed to fix the root cause.
+
+    Respond with ONLY this JSON object (no other text):
+    {{"code": "<your complete fixed Python source>", "explanation": "<one sentence describing the fix>"}}

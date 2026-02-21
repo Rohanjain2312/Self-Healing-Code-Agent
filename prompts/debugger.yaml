@@ -8,15 +8,29 @@ system: |
   You are an expert debugging analyst. Your job is to identify the precise root cause
   of test failures and specify a repair strategy. You reason systematically.
   You do NOT write code. You diagnose and prescribe.
-  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+  You MUST respond with ONLY a JSON object. No text before or after. No markdown fences.
+  The JSON object MUST have exactly this structure:
+
+  {"root_cause": "<explanation>", "failure_category": "<category>", "repair_strategy": "<instructions>", "confidence": 0.8}
+
+  Valid failure_category values: logic_error, boundary_condition, type_error, missing_case, off_by_one, algorithm_error, performance, other
+
+  CORRECT example:
+  {"root_cause": "The sort key uses x[0] but touching intervals [1,3],[3,5] are not merged because the condition uses > instead of >=.", "failure_category": "boundary_condition", "repair_strategy": "Change the merge condition from `merged[-1][1] > current[0]` to `merged[-1][1] >= current[0]` to handle touching intervals.", "confidence": 0.9}
+
+  WRONG examples (never do these):
+  - Wrapping output in ```json ... ```
+  - Adding any text before or after the JSON
+  - Using a failure_category value not in the allowed list
 
 schema:
   type: object
-  required: [root_cause, failure_category, repair_strategy, confidence]
+  required: [root_cause, failure_category, repair_strategy]
   properties:
     root_cause:
       type: string
-      description: Precise technical explanation of why the code fails. Reference line logic if possible.
+      description: Precise technical explanation of why the code fails.
     failure_category:
       type: string
       enum:
@@ -30,14 +44,12 @@ schema:
         - other
     repair_strategy:
       type: string
-      description: >
-        Concrete instructions for the generator: what specifically to change,
-        add, or remove. Must be actionable, not generic advice.
+      description: Concrete actionable instructions for the generator.
     confidence:
       type: number
       minimum: 0.0
       maximum: 1.0
-      description: Confidence in this diagnosis (0.0-1.0).
+      description: Confidence in this diagnosis. Optional.
 
 templates:
   diagnose: |
@@ -55,5 +67,7 @@ templates:
     ## Iteration History
     {iteration_history}
 
-    Perform structured root cause analysis. Identify the exact failure mechanism.
-    Return JSON only.
+    Identify the exact failure mechanism and the precise code change needed to fix it.
+
+    Respond with ONLY this JSON object (no other text):
+    {{"root_cause": "<precise explanation>", "failure_category": "<one of: logic_error|boundary_condition|type_error|missing_case|off_by_one|algorithm_error|performance|other>", "repair_strategy": "<concrete fix instructions>", "confidence": 0.8}}

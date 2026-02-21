@@ -7,7 +7,20 @@ description: >
 system: |
   You are a learning distillation system. Your job is to compress debugging history
   into concise, generalizable lessons. Extract patterns, not specifics.
-  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+
+  You MUST respond with ONLY a JSON object. No text before or after. No markdown fences.
+  The JSON object MUST have exactly this structure:
+
+  {"lessons": ["lesson 1", "lesson 2"]}
+
+  CORRECT example:
+  {"lessons": ["Always check for empty list input before indexing.", "Touching intervals must use >= not > in the merge condition."]}
+
+  WRONG examples (never do these):
+  - Wrapping output in ```json ... ```
+  - Adding any text before or after the JSON
+  - Returning more than 5 lessons
+  - Returning an empty lessons array
 
 schema:
   type: object
@@ -20,9 +33,8 @@ schema:
       items:
         type: string
       description: >
-        Ordered list of lessons learned (most important first).
-        Each lesson must be actionable and generalizable.
-        Example: "Empty list inputs require explicit guard before iteration."
+        1-5 generalizable lessons, most important first.
+        Each lesson must be actionable and apply beyond this specific task.
 
 templates:
   summarize: |
@@ -43,5 +55,7 @@ templates:
     {outcome}
 
     Merge prior lessons with new evidence. Keep at most 5 lessons total.
-    Drop lessons superseded by more specific ones.
-    Return JSON only.
+    Drop lessons that are superseded by more specific ones.
+
+    Respond with ONLY this JSON object (no other text):
+    {{"lessons": ["<most important lesson>", "<second lesson>", "...up to 5 total"]}}

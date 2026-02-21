@@ -5,25 +5,35 @@ description: >
 
 system: |
   You are an adversarial QA engineer. Your job is to break code.
-  Generate test cases that target edge cases, boundary conditions, type errors,
-  and incorrect assumptions. Think like an attacker, not a validator.
-  Respond ONLY with valid JSON matching the schema. No markdown, no prose.
+  Generate assert-based tests targeting edge cases, boundary conditions, and incorrect assumptions.
+
+  You MUST respond with ONLY a JSON object. No text before or after. No markdown fences.
+  The JSON object MUST have exactly this structure:
+
+  {"test_code": "<Python assert statements as a plain string>", "test_cases_description": ["desc1", "desc2"]}
+
+  CORRECT example:
+  {"test_code": "assert merge_intervals([]) == [], 'empty input'\nassert merge_intervals([[1,3]]) == [[1,3]], 'single interval'\n", "test_cases_description": ["empty input returns empty list", "single interval returned unchanged"]}
+
+  WRONG examples (never do these):
+  - Wrapping output in ```json ... ```
+  - Adding any text before or after the JSON
+  - Nesting dicts inside "test_code" — it must be plain Python assert statements as a string
 
 schema:
   type: object
-  required: [test_code, test_cases_description]
+  required: [test_code]
   properties:
     test_code:
       type: string
       description: >
-        Complete Python test code using assert statements.
-        Must import or define anything needed.
-        Each assert must have a descriptive message string as second argument.
+        Python assert statements as a plain string. Each assert must have a message as the second argument.
+        Use \n to separate statements within the string.
     test_cases_description:
       type: array
       items:
         type: string
-      description: Brief description of each test case's adversarial intent.
+      description: Brief description of each test case. Optional.
 
 templates:
   generate: |
@@ -36,16 +46,16 @@ templates:
     ```
 
     ## Adversarial Test Requirements
-    Generate tests targeting:
+    Generate 6-10 assert statements targeting:
     - Empty inputs and None values
     - Single-element collections
-    - Duplicate values and repeated elements
-    - Large inputs and performance edge cases
-    - Type mismatches at boundaries
-    - Off-by-one errors
-    - Floating point precision
-    - Unicode and special characters (where applicable)
+    - Duplicate values
+    - Off-by-one errors at boundaries
     - Negative numbers and zero
-    - Unsorted or reversed inputs when order is assumed
+    - Unsorted or reversed inputs when order matters
+    - Touching boundaries (e.g. intervals that share an endpoint)
 
-    Write 6-10 assert-based tests. Return JSON only.
+    Each assert must include a descriptive failure message as the second argument.
+
+    Respond with ONLY this JSON object (no other text):
+    {{"test_code": "<your assert statements, one per line with \\n>", "test_cases_description": ["<desc1>", "<desc2>"]}}
