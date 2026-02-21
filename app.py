@@ -2,14 +2,13 @@
 HuggingFace Spaces entry point.
 
 HF Spaces expects app.py in the repository root.
-This file delegates to demo/app.py and pre-warms the LLM in the background
-so the model is loaded before the first user request arrives.
+This file pre-warms the LLM synchronously before launching Gradio, so the
+model is fully loaded and ready the moment the first user request arrives.
 """
 
 import asyncio
 import logging
 import sys
-import threading
 from pathlib import Path
 
 # Ensure the project root is importable
@@ -20,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def _prewarm() -> None:
-    """Load model weights into memory before the first user request.
+    """Load model weights into memory before Gradio starts accepting requests.
 
-    Runs in a daemon thread so the Gradio server starts immediately.
+    Runs synchronously so the model is fully loaded before launch().
     If the provider does not support pre-warming (e.g. Ollama, Mock),
     the function exits silently.
     """
@@ -30,6 +29,7 @@ def _prewarm() -> None:
         from llm.router import LLMRouter
         router = LLMRouter()
         if hasattr(router.provider, "_ensure_loaded"):
+            logger.info("Pre-warming model: %s ...", router.provider.model_name)
             asyncio.run(router.provider._ensure_loaded())
             logger.info("Model pre-warm complete: %s", router.provider.model_name)
         else:
@@ -40,8 +40,8 @@ def _prewarm() -> None:
         logger.warning("Pre-warm failed (non-fatal): %s", exc)
 
 
-# Start pre-warm in background so Gradio server starts immediately
-threading.Thread(target=_prewarm, daemon=True, name="model-prewarm").start()
+# Pre-warm synchronously — blocks until model is loaded, then launch Gradio
+_prewarm()
 
 from demo.app import build_app  # noqa: E402 — import after path setup
 
