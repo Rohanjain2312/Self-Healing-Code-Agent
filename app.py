@@ -8,6 +8,7 @@ model is fully loaded and ready the moment the first user request arrives.
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -46,4 +47,7 @@ _prewarm()
 from demo.app import build_app  # noqa: E402 — import after path setup
 
 demo = build_app()
-demo.launch()
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=int(os.environ.get("PORT", 7860)),
+)
