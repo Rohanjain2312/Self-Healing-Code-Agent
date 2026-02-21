@@ -113,11 +113,7 @@ def build_app() -> gr.Blocks:
     .lessons-box { font-size: 0.9rem; }
     """
 
-    with gr.Blocks(
-        title="Self-Healing Code Agent",
-        theme=gr.themes.Soft(),
-        css=css,
-    ) as app:
+    with gr.Blocks(title="Self-Healing Code Agent") as app:
         gr.Markdown(
             """
 # Self-Healing Code Agent
@@ -269,6 +265,7 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),
         share=False,
+        theme=gr.themes.Soft(),
     )
 
 
