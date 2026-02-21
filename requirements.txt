@@ -13,11 +13,11 @@ httpx>=0.27.0
 # YAML prompt loading
 pyyaml>=6.0.0
 
-# HuggingFace inference (lazy-loaded — GPU environments only)
-# transformers>=4.40.0
-# torch>=2.1.0
-# accelerate>=0.27.0
-# bitsandbytes>=0.43.0       # 4-bit quantization for RAM efficiency
+# HuggingFace inference (GPU environments — HF Spaces installs these automatically)
+transformers>=4.40.0
+torch>=2.1.0
+accelerate>=0.27.0
+# bitsandbytes>=0.43.0       # 4-bit quantization — only needed for very large models
 
 # Ollama client (local dev)
 ollama>=0.2.0

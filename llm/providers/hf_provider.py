@@ -36,6 +36,16 @@ class HuggingFaceProvider(BaseLLMProvider):
         device_map: str = "auto",
     ) -> None:
         self._model_id = model or os.environ.get("HF_MODEL", _DEFAULT_MODEL)
+
+        # If running on Colab with a real GPU and no explicit HF_MODEL override,
+        # automatically upgrade to the larger 8B model.
+        if (
+            not model
+            and not os.environ.get("HF_MODEL")
+            and (os.environ.get("COLAB_GPU") or os.environ.get("COLAB_RELEASE_TAG"))
+        ):
+            self._model_id = _COLAB_MODEL
+
         # Use 4-bit if explicitly requested or if running on Colab (detected via env)
         self._use_4bit = use_4bit if use_4bit is not None else bool(
             os.environ.get("COLAB_GPU") or os.environ.get("USE_4BIT")
@@ -78,7 +88,7 @@ class HuggingFaceProvider(BaseLLMProvider):
         kwargs: dict[str, Any] = {
             "model": self._model_id,
             "device_map": self._device_map,
-            "torch_dtype": torch.float16,
+            "dtype": torch.float16,
         }
 
         if self._use_4bit:

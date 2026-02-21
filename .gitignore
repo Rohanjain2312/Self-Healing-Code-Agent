@@ -17,6 +17,8 @@ ENV/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+# Allow the Colab launcher notebook to be tracked
+!colab/*.ipynb
 
 # Environment
 .env
