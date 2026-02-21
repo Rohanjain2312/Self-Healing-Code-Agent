@@ -108,7 +108,9 @@ def parse_and_validate(raw_text: str, schema: dict) -> dict[str, Any]:
     extracted = _extract_json_object(cleaned)
 
     try:
-        parsed = json.loads(extracted)
+        # strict=False accepts literal control characters (raw tabs/newlines)
+        # inside JSON string values — a common LLM mistake when writing code.
+        parsed = json.loads(extracted, strict=False)
     except json.JSONDecodeError as exc:
         raise StructuredOutputError(
             f"JSON parse failed: {exc}",
