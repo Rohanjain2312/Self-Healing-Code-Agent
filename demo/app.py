@@ -19,6 +19,7 @@ Design principles:
   - No chain-of-thought or internal prompts exposed
   - Tab 2 loads precomputed data — no live inference
   - Respects HF Spaces free tier limits
+  - Compatible with Gradio 5.x (Python 3.13 safe)
 """
 
 import logging
@@ -39,13 +40,62 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Performance tab: chart builders
+# Performance tab: chart builders (matplotlib-based for Gradio 5 compat)
 # ---------------------------------------------------------------------------
+
+def _make_category_chart(cat_data: dict):
+    """Build a matplotlib bar chart for category success rates."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        categories = cat_data.get("Category", [])
+        rates = cat_data.get("Success Rate", [])
+        if not categories:
+            return None
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        bars = ax.bar(categories, rates, color="#4C9BE8")
+        ax.set_ylim(0, 100)
+        ax.set_ylabel("Success Rate (%)")
+        ax.set_title("Success Rate by Category")
+        ax.bar_label(bars, fmt="%.0f%%", padding=3)
+        plt.xticks(rotation=20, ha="right")
+        plt.tight_layout()
+        return fig
+    except Exception:
+        return None
+
+
+def _make_iteration_chart(iter_data: dict):
+    """Build a matplotlib bar chart for iteration distribution."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        iterations = iter_data.get("Iterations", [])
+        tasks = iter_data.get("Tasks", [])
+        if not iterations:
+            return None
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        bars = ax.bar([str(i) for i in iterations], tasks, color="#58B68A")
+        ax.set_xlabel("Iterations")
+        ax.set_ylabel("Number of Tasks")
+        ax.set_title("Iteration Distribution")
+        ax.bar_label(bars, padding=3)
+        plt.tight_layout()
+        return fig
+    except Exception:
+        return None
+
 
 def _build_performance_components():
     """
     Build the performance tab content from precomputed results.json.
-    Returns (summary_text, category_chart_data, iteration_chart_data).
+    Returns (summary_text, cat_fig, iter_fig).
     """
     results = load_results(_PROJECT_ROOT / "evaluation" / "results.json")
     if not results:
@@ -97,7 +147,7 @@ def _build_performance_components():
         "Tasks": list(iter_counts.values()),
     }
 
-    return summary_text, cat_data, iter_data
+    return summary_text, _make_category_chart(cat_data), _make_iteration_chart(iter_data)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +155,7 @@ def _build_performance_components():
 # ---------------------------------------------------------------------------
 
 def build_app() -> gr.Blocks:
-    summary_text, cat_data, iter_data = _build_performance_components()
+    summary_text, cat_fig, iter_fig = _build_performance_components()
 
     css = """
     .timeline-box { font-family: monospace; font-size: 0.85rem; }
@@ -113,7 +163,7 @@ def build_app() -> gr.Blocks:
     .lessons-box { font-size: 0.9rem; }
     """
 
-    with gr.Blocks(title="Self-Healing Code Agent") as app:
+    with gr.Blocks(title="Self-Healing Code Agent", css=css) as app:
         gr.Markdown(
             """
 # Self-Healing Code Agent
@@ -225,23 +275,11 @@ Benchmark runs are executed on GPU (Colab) — results loaded from precomputed d
             else:
                 gr.Markdown("No precomputed results found.")
 
-            if cat_data and cat_data.get("Category"):
-                gr.BarPlot(
-                    value=cat_data,
-                    x="Category",
-                    y="Success Rate",
-                    title="Success Rate by Category (%)",
-                    color="Category",
-                )
+            if cat_fig is not None:
+                gr.Plot(value=cat_fig, label="Success Rate by Category")
 
-            if iter_data and iter_data.get("Iterations"):
-                gr.BarPlot(
-                    value=iter_data,
-                    x="Iterations",
-                    y="Tasks",
-                    title="Iteration Distribution (how many iterations tasks required)",
-                    color="Iterations",
-                )
+            if iter_fig is not None:
+                gr.Plot(value=iter_fig, label="Iteration Distribution")
 
             gr.Markdown(
                 """
@@ -264,7 +302,6 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),
         share=False,
-        theme=gr.themes.Soft(),
     )
 
 
