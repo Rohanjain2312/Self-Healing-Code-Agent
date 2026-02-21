@@ -69,7 +69,7 @@ class HuggingFaceProvider(BaseLLMProvider):
         async with self._lock:
             if self._pipeline is not None:
                 return
-            self._pipeline = await asyncio.get_event_loop().run_in_executor(
+            self._pipeline = await asyncio.get_running_loop().run_in_executor(
                 None, self._load_pipeline
             )
 
@@ -112,7 +112,7 @@ class HuggingFaceProvider(BaseLLMProvider):
             {"role": "user", "content": request.user_prompt},
         ]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: self._pipeline(
