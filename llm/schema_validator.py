@@ -72,13 +72,37 @@ def _extract_json_object(text: str) -> str:
     return text
 
 
+def _coerce_parsed(parsed: dict[str, Any], schema: dict) -> dict[str, Any]:
+    """
+    Best-effort coercion for common model output mistakes before schema validation.
+
+    Handles the case where the model puts structured JSON under a field that
+    should be a plain string (e.g. "code": {"functions": [...]} instead of
+    "code": "def f(): ..."). Converts those nested values back to strings.
+    """
+    required_string_fields = [
+        field
+        for field, defn in schema.get("properties", {}).items()
+        if defn.get("type") == "string"
+        and field in schema.get("required", [])
+    ]
+    for field in required_string_fields:
+        value = parsed.get(field)
+        # Only coerce container types (dict/list) — the model returned structured
+        # JSON where it should have put Python source text. Primitives (int, bool,
+        # None) are genuine type errors and should fail validation normally.
+        if isinstance(value, (dict, list)):
+            parsed[field] = json.dumps(value)
+    return parsed
+
+
 def parse_and_validate(raw_text: str, schema: dict) -> dict[str, Any]:
     """
     Parse raw LLM text into a validated dict.
 
     Raises StructuredOutputError if:
       - text cannot be parsed as JSON
-      - parsed object fails schema validation
+      - parsed object fails schema validation after coercion attempts
     """
     cleaned = _strip_markdown_fences(raw_text)
     extracted = _extract_json_object(cleaned)
@@ -92,6 +116,8 @@ def parse_and_validate(raw_text: str, schema: dict) -> dict[str, Any]:
         ) from exc
 
     if schema:
+        # Attempt coercion before validation so type mismatches don't burn retries
+        parsed = _coerce_parsed(parsed, schema)
         try:
             jsonschema.validate(instance=parsed, schema=schema)
         except JsonSchemaValidationError as exc:

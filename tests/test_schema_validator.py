@@ -7,7 +7,7 @@ from llm.schema_validator import parse_and_validate, StructuredOutputError
 
 _SIMPLE_SCHEMA = {
     "type": "object",
-    "required": ["code", "explanation"],
+    "required": ["code"],
     "properties": {
         "code": {"type": "string"},
         "explanation": {"type": "string"},
@@ -40,9 +40,19 @@ def test_invalid_json_raises():
 
 
 def test_schema_violation_raises():
-    raw = '{"code": 123}'  # code should be string, missing explanation
+    # code is a number — coercion only handles dict/list → string, not int → string
+    raw = '{"code": 123}'
     with pytest.raises(StructuredOutputError):
         parse_and_validate(raw, _SIMPLE_SCHEMA)
+
+
+def test_nested_dict_in_required_string_field_is_coerced():
+    # Model returns a nested dict under "code" instead of a Python source string.
+    # _coerce_parsed should convert it to a JSON string so validation passes.
+    raw = '{"code": {"functions": [{"name": "f"}]}, "explanation": "test"}'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert isinstance(result["code"], str)
+    assert "functions" in result["code"]  # JSON-serialised representation
 
 
 def test_no_schema_skips_validation():
