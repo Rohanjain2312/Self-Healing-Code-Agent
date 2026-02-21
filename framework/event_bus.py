@@ -97,10 +97,12 @@ class EventBus:
 def emit_sync(bus: EventBus, event: dict[str, Any]) -> None:
     """Synchronous emit for contexts where async is not available."""
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(bus.emit(event))
-        else:
-            loop.run_until_complete(bus.emit(event))
+        loop = asyncio.get_running_loop()
+        # Already inside a running event loop — schedule as a task
+        loop.create_task(bus.emit(event))
     except RuntimeError:
-        pass
+        # No running loop — start one just for this call
+        try:
+            asyncio.run(bus.emit(event))
+        except Exception:
+            pass

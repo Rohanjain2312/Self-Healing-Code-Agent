@@ -46,4 +46,4 @@ _prewarm()
 from demo.app import build_app  # noqa: E402 — import after path setup
 
 demo = build_app()
-demo.launch(theme="soft")
+demo.launch()
