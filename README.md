@@ -1,18 +1,30 @@
 ---
-title: Self Healing Code Agent
-emoji: 🤖
-colorFrom: blue
-colorTo: green
+title: Self-Healing Code Agent
 sdk: gradio
 sdk_version: 4.19.2
 app_file: app.py
 pinned: false
+license: mit
+short_description: An autonomous agent that detects and fixes its own code errors.
 ---
 
 # Self-Healing Code Agent
 
-An event-driven autonomous agent framework that improves program correctness
-using adversarial testing, structured reasoning, rolling memory, and iterative repair.
+This project is an autonomous Machine Learning agent designed to monitor, diagnose, and repair code execution errors in real-time. 
+
+## Project Links
+- **GitHub Repository:** https://github.com/Rohanjain2312/Self-Healing-Code-Agent
+- **Hugging Face Space:** https://huggingface.co/spaces/rohanjain2312/Self-Healing-Code-Agent
+
+## Technical Stack
+- **LLM:** Meta-Llama-3.2-3B-Instruct
+- **Framework:** Gradio / Python
+- **Environment:** Hugging Face Spaces
+
+## Implementation Strategy
+1. **Trace Analysis:** Capture traceback data from failed executions.
+2. **Context Injection:** Feed error logs and source code into the LLM.
+3. **Recursive Correction:** Apply suggested fixes and re-test until the execution succeeds.
 
 ## Architecture
 
