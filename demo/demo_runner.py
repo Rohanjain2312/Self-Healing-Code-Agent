@@ -155,17 +155,9 @@ def run_demo_sync(
             results.append(update)
         return results
 
-    # Run the async generator to completion in a new event loop
-    # (Gradio may not be running in an async context)
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        results = loop.run_until_complete(_collect())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        results = loop.run_until_complete(_collect())
+    # asyncio.run() always creates and tears down its own event loop.
+    # This is required inside Gradio's AnyIO worker threads, where
+    # asyncio.get_event_loop() raises RuntimeError (no current loop).
+    results = asyncio.run(_collect())
 
     yield from results

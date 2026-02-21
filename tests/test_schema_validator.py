@@ -65,3 +65,19 @@ def test_nested_json_extraction():
     raw = 'Response: {"code": "x=1", "explanation": "assigns x"} done.'
     result = parse_and_validate(raw, _SIMPLE_SCHEMA)
     assert result["code"] == "x=1"
+
+
+def test_literal_newlines_in_string_value_parse():
+    # Model embeds real (literal) newlines inside a JSON string value instead
+    # of \n escape sequences — strict JSON rejects this; strict=False accepts it.
+    _QA_SCHEMA = {
+        "type": "object",
+        "required": ["test_code"],
+        "properties": {"test_code": {"type": "string"}},
+    }
+    # Build a string that contains a literal newline character inside the JSON value
+    raw_literal = '{"test_code": "assert f([]) == []\n assert f([1]) == [1]\n"}'
+    result = parse_and_validate(raw_literal, _QA_SCHEMA)
+    assert isinstance(result["test_code"], str)
+    assert "assert" in result["test_code"]
+
