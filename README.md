@@ -1,13 +1,12 @@
 ---
-title: Self-Healing Code Agent
-emoji: 🔧
+title: Self Healing Code Agent
+emoji: 🤖
 colorFrom: blue
 colorTo: green
 sdk: gradio
-sdk_version: "5.0.0"
+sdk_version: 4.19.2
 app_file: app.py
 pinned: false
-license: apache-2.0
 ---
 
 # Self-Healing Code Agent
