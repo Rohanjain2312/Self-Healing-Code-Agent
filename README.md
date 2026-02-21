@@ -1,11 +1,11 @@
 ---
 title: Self-Healing Code Agent
 sdk: gradio
-sdk_version: 4.19.2
+sdk_version: 4.36.0
 app_file: app.py
 pinned: false
 license: mit
-short_description: An autonomous agent that detects and fixes its own code errors.
+short_description: Autonomous agent that self-heals Python code errors.
 ---
 
 # Self-Healing Code Agent
