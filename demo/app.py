@@ -231,7 +231,6 @@ Benchmark runs are executed on GPU (Colab) — results loaded from precomputed d
                     x="Category",
                     y="Success Rate",
                     title="Success Rate by Category (%)",
-                    y_lim=[0, 100],
                     color="Category",
                 )
 
