@@ -66,7 +66,7 @@ async def generate_solution(
         role="generator",
         template_key=template_key,
         variables=variables,
-        max_new_tokens=1024,
+        max_new_tokens=2048,
     )
 
     code = result["code"]

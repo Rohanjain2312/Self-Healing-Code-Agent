@@ -103,7 +103,7 @@ class LLMRouter:
         role: str,
         template_key: str,
         variables: dict[str, Any],
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 2048,
         base_temperature: float = 0.2,
     ) -> dict[str, Any]:
         """

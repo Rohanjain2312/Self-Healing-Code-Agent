@@ -38,7 +38,7 @@ async def create_adversarial_tests(
             "task_description": state["task_description"],
             "code": state["current_code"],
         },
-        max_new_tokens=768,
+        max_new_tokens=1024,
     )
 
     test_code = result["test_code"]
