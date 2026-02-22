@@ -47,7 +47,7 @@ async def diagnose_failure(
             "test_results": state.get("last_failure_summary", "No failure details."),
             "iteration_history": iteration_history_text,
         },
-        max_new_tokens=512,
+        max_new_tokens=768,
     )
 
     root_cause = result["root_cause"]

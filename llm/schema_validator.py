@@ -96,6 +96,29 @@ def _coerce_parsed(parsed: dict[str, Any], schema: dict) -> dict[str, Any]:
     return parsed
 
 
+def _salvage_code_field(text: str) -> dict[str, Any] | None:
+    """
+    Last-resort extraction: pull the 'code' field out of truncated JSON using
+    regex. Handles the common case where max_new_tokens cuts off the JSON
+    mid-way but the code value itself is intact.
+
+    Looks for: "code": "<content>" or "code": "<content (truncated)"
+    """
+    # Match "code": "..." allowing for truncation (no closing quote required)
+    pattern = re.compile(r'"code"\s*:\s*"((?:[^"\\]|\\.)*)', re.DOTALL)
+    match = pattern.search(text)
+    if match:
+        raw_code = match.group(1)
+        # Unescape JSON string escapes
+        try:
+            code = raw_code.encode("utf-8").decode("unicode_escape")
+        except Exception:
+            code = raw_code
+        if code.strip():
+            return {"code": code}
+    return None
+
+
 def parse_and_validate(raw_text: str, schema: dict) -> dict[str, Any]:
     """
     Parse raw LLM text into a validated dict.
@@ -112,10 +135,16 @@ def parse_and_validate(raw_text: str, schema: dict) -> dict[str, Any]:
         # inside JSON string values — a common LLM mistake when writing code.
         parsed = json.loads(extracted, strict=False)
     except json.JSONDecodeError as exc:
-        raise StructuredOutputError(
-            f"JSON parse failed: {exc}",
-            raw_text=raw_text,
-        ) from exc
+        # Last resort: try salvaging just the code field from truncated output.
+        # This handles the case where max_new_tokens cuts the JSON off mid-way.
+        salvaged = _salvage_code_field(raw_text)
+        if salvaged:
+            parsed = salvaged
+        else:
+            raise StructuredOutputError(
+                f"JSON parse failed: {exc}",
+                raw_text=raw_text,
+            ) from exc
 
     if schema:
         # Attempt coercion before validation so type mismatches don't burn retries
