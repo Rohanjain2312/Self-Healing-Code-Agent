@@ -43,7 +43,17 @@ An autonomous agent that generates Python code, adversarially tests it with edge
 
 ---
 
+## Demo
+
+![Self-Healing Code Agent — live run](assets/screenshots/demo_run.png)
+
+*Live run: the agent generated a Python solution, tested it adversarially, diagnosed a failure, and applied a targeted repair — all autonomously. Execution Timeline (bottom left) and Learning Log (right) update in real time.*
+
+---
+
 ## How to Run It
+
+> ⚠️ Deploying to HuggingFace Spaces? See [`docs/deployment-issues.md`](docs/deployment-issues.md) for a full log of known failure modes and fixes encountered during this build.
 
 ### Prerequisites
 
@@ -184,6 +194,14 @@ Success / Max Iterations
 | Execution sandbox | Python subprocess with wall-clock timeout and structured output markers |
 | Async runtime | asyncio · AnyIO · LangGraph async nodes · async event bus (pub/sub) |
 | Testing | pytest · pytest-asyncio · mock provider (no GPU required) |
+
+---
+
+## Development Notes
+
+The agent architecture, workflow design, LangGraph state machine topology, YAML prompt schemas, and all key engineering decisions were designed and authored by Rohan Jain. [Claude Code](https://claude.ai/code) was used as an implementation accelerator to handle repetitive boilerplate, file scaffolding, and iterative debugging — similar to how a senior engineer uses Copilot or a junior developer for implementation tasks while retaining full design ownership.
+
+All architectural choices, agent interaction patterns, structured output schemas, and the self-healing repair logic reflect the author's original engineering judgment.
 
 ---
 
