@@ -28,6 +28,9 @@ from agent.events import (
     TIMEOUT,
     SPEC_TESTS_GENERATED,
     REPAIR_REVIEW,
+    TOOL_USE,
+    CRITIC_REVIEW,
+    PARALLEL_REPAIR,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +47,9 @@ PUBLIC_EVENT_TYPES = {
     TESTS_GENERATED,
     SPEC_TESTS_GENERATED,
     REPAIR_REVIEW,
+    TOOL_USE,
+    CRITIC_REVIEW,
+    PARALLEL_REPAIR,
 }
 
 
@@ -104,6 +110,26 @@ def format_event_for_timeline(event: dict[str, Any]) -> str:
 
     if event_type == SUCCESS:
         return f"{prefix} SUCCESS — all tests passed."
+
+    if event_type == TOOL_USE:
+        tool_name = payload.get("tool_name", "unknown")
+        result_preview = payload.get("result", "")[:80].replace("\n", " ")
+        return f"{prefix} Tool: {tool_name} → {result_preview}"
+
+    if event_type == CRITIC_REVIEW:
+        verdict = payload.get("verdict", "unknown")
+        confidence = payload.get("confidence", 0.0)
+        issues = payload.get("issues", [])
+        line = f"{prefix} Critic: {verdict.upper()} (confidence={confidence:.0%})"
+        if issues:
+            line += f" — {issues[0][:80]}"
+        return line
+
+    if event_type == PARALLEL_REPAIR:
+        strategy = payload.get("strategy_name", "unknown")
+        spec = payload.get("spec_passed", False)
+        adv = payload.get("adv_passed", False)
+        return f"{prefix} Parallel[{strategy}]: spec={spec} adv={adv}"
 
     return f"{prefix} {message}"
 

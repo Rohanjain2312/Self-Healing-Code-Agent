@@ -47,6 +47,8 @@ from agent.nodes.diagnose_failure import diagnose_failure
 from agent.nodes.update_learning_log import update_learning_log
 from agent.nodes.generate_spec_tests import generate_spec_tests
 from agent.nodes.review_repair import review_repair
+from agent.nodes.critic_review import critic_review
+from agent.nodes.parallel_generate import fan_out_repairs, parallel_generate, select_best_repair
 from llm.router import LLMRouter
 
 logger = logging.getLogger(__name__)
@@ -72,27 +74,51 @@ def _increment_iteration(state: AgentState) -> dict[str, Any]:
     return {"iteration": new_iteration, "status": "running"}
 
 
-def _route_after_execution(
+def _make_route_after_execution(enable_critic: bool):
+    """
+    Factory for the post-execution conditional edge.
+
+    Separates the enable_critic flag from the routing function so the function
+    signature matches what LangGraph expects (state only, no extra args).
+    """
+    def _route_after_execution(
+        state: AgentState,
+    ) -> Literal["critic_review", "diagnose_failure", "__end__", "max_iterations"]:
+        """
+        Conditional edge: determine next node after test execution.
+
+        - Pass + critic enabled → critic_review
+        - Pass + no critic → END
+        - Fail + iterations remaining → diagnose_failure
+        - Fail + max iterations exhausted → terminal END
+        """
+        if state.get("last_execution_passed"):
+            return "critic_review" if enable_critic else "__end__"
+
+        if state.get("status") == "max_iterations_reached":
+            return "max_iterations"
+
+        iteration = state.get("iteration", 0)
+        max_iter = state.get("max_iterations", 4)
+        if iteration >= max_iter:
+            return "max_iterations"
+
+        return "diagnose_failure"
+
+    return _route_after_execution
+
+
+def _route_after_critic(
     state: AgentState,
-) -> Literal["diagnose_failure", "__end__", "max_iterations"]:
+) -> Literal["diagnose_failure", "__end__"]:
     """
-    Conditional edge: determine next node after test execution.
+    Conditional edge: determine next node after critic review.
 
-    - Pass → END
-    - Fail + iterations remaining → diagnose_failure
-    - Fail + max iterations exhausted → terminal END
+    - Critic approved (last_execution_passed still True) → END
+    - Critic rejected (last_execution_passed set to False) → diagnose_failure
     """
-    if state.get("last_execution_passed"):
+    if state.get("last_execution_passed", True):
         return "__end__"
-
-    if state.get("status") == "max_iterations_reached":
-        return "max_iterations"
-
-    iteration = state.get("iteration", 0)
-    max_iter = state.get("max_iterations", 4)
-    if iteration >= max_iter:
-        return "max_iterations"
-
     return "diagnose_failure"
 
 
@@ -126,6 +152,42 @@ def _route_after_increment(
     return "generate_solution"
 
 
+def _build_role_providers(config: AgentConfig) -> dict:
+    """
+    Build per-role provider overrides from config.model_overrides (Fix 17).
+
+    config.model_overrides maps role names → model names. For each override,
+    we create a provider instance (same type as default) configured for that
+    model. If the override model name is the same as the default, no override
+    is created.
+
+    Supported format: {"memory_summarizer": "llama3:3b", "generator": "llama3"}
+    Only Ollama overrides are supported today; HF and Mock ignore model_name.
+    """
+    if not config.model_overrides:
+        return {}
+
+    role_providers: dict = {}
+    import os
+    provider_env = os.environ.get("LLM_PROVIDER", "").lower()
+
+    for role, model_name in config.model_overrides.items():
+        try:
+            if provider_env == "ollama" or provider_env == "":
+                from llm.providers.ollama_provider import OllamaProvider
+                role_providers[role] = OllamaProvider(model=model_name)
+                logger.info("Role '%s' overridden to model '%s' (Ollama)", role, model_name)
+            # Mock and HuggingFace providers don't support per-role model overrides
+            # in a meaningful way — skip silently for those providers
+        except Exception as exc:
+            logger.warning(
+                "Failed to create role override for role=%s model=%s: %s",
+                role, model_name, exc,
+            )
+
+    return role_providers
+
+
 def build_graph(
     router: LLMRouter | None = None,
     config: AgentConfig | None = None,
@@ -141,10 +203,13 @@ def build_graph(
     Returns:
         Compiled LangGraph StateGraph (CompiledGraph) ready for ainvoke/astream.
     """
-    if router is None:
-        router = LLMRouter()
     if config is None:
         config = AgentConfig.development()
+
+    # Fix 17: build role-specific provider overrides from config.model_overrides
+    if router is None:
+        role_providers = _build_role_providers(config)
+        router = LLMRouter(role_providers=role_providers)
 
     # Bind router to all nodes that require it (partial application)
     _generate = functools.partial(generate_solution, router=router)
@@ -152,6 +217,8 @@ def build_graph(
     _diagnose = functools.partial(diagnose_failure, router=router)
     _memory = functools.partial(update_learning_log, router=router)
     _spec_tests = functools.partial(generate_spec_tests, router=router)
+    _critic = functools.partial(critic_review, router=router, agent_config=config)
+    _parallel_gen = functools.partial(parallel_generate, router=router)
 
     graph = StateGraph(AgentState)
 
@@ -176,16 +243,39 @@ def build_graph(
     graph.add_edge("generate_solution", "create_adversarial_tests")
     graph.add_edge("create_adversarial_tests", "execute_solution")
 
-    # ── Conditional routing after execution ──────────────────────────────────
-    graph.add_conditional_edges(
-        "execute_solution",
-        _route_after_execution,
-        {
-            "__end__": END,
-            "diagnose_failure": "diagnose_failure",
-            "max_iterations": "max_iterations",
-        },
-    )
+    # ── Optional: critic node (Fix 15) ───────────────────────────────────────
+    _route_exec = _make_route_after_execution(config.enable_critic)
+    if config.enable_critic:
+        graph.add_node("critic_review", _critic)
+        graph.add_conditional_edges(
+            "execute_solution",
+            _route_exec,
+            {
+                "critic_review": "critic_review",
+                "diagnose_failure": "diagnose_failure",
+                "max_iterations": "max_iterations",
+                "__end__": END,
+            },
+        )
+        graph.add_conditional_edges(
+            "critic_review",
+            _route_after_critic,
+            {
+                "__end__": END,
+                "diagnose_failure": "diagnose_failure",
+            },
+        )
+    else:
+        # No critic — direct routing after execution
+        graph.add_conditional_edges(
+            "execute_solution",
+            _route_exec,
+            {
+                "__end__": END,
+                "diagnose_failure": "diagnose_failure",
+                "max_iterations": "max_iterations",
+            },
+        )
 
     # ── Confidence-aware routing after diagnosis (Fix 7) ─────────────────────
     graph.add_conditional_edges(
@@ -205,15 +295,38 @@ def build_graph(
     else:
         graph.add_edge("update_learning_log", "increment_iteration")
 
-    # ── Repair loop completion ────────────────────────────────────────────────
-    graph.add_conditional_edges(
-        "increment_iteration",
-        _route_after_increment,
-        {
-            "generate_solution": "generate_solution",
-            "__end__": END,
-        },
-    )
+    # ── Repair loop completion (Fix 14: parallel strategies optional) ─────────
+    if config.parallel_strategies:
+        # Fan-out repair: increment → (Send) parallel_generate × 3
+        #                           → select_best_repair → create_adversarial_tests
+        graph.add_node("parallel_generate", _parallel_gen)
+        graph.add_node("select_best_repair", select_best_repair)
+
+        # Routing function: returns END at max iterations, else Send() fan-out list
+        def _route_after_increment_parallel(
+            state: AgentState,
+        ):
+            if state.get("status") == "max_iterations_reached":
+                return END
+            return fan_out_repairs(state)  # list of Send("parallel_generate", {...})
+
+        graph.add_conditional_edges(
+            "increment_iteration",
+            _route_after_increment_parallel,
+            ["parallel_generate", END],
+        )
+        graph.add_edge("parallel_generate", "select_best_repair")
+        # After tournament selection, re-run QA and execution on the winning code
+        graph.add_edge("select_best_repair", "create_adversarial_tests")
+    else:
+        graph.add_conditional_edges(
+            "increment_iteration",
+            _route_after_increment,
+            {
+                "generate_solution": "generate_solution",
+                "__end__": END,
+            },
+        )
     graph.add_edge("max_iterations", END)
 
     # ── Checkpointer (Fix 13) ─────────────────────────────────────────────────
@@ -265,6 +378,8 @@ def _make_initial_state(
         iteration_history=[],
         status="running",
         degraded_nodes=[],
+        parallel_repairs=[],
+        strategy_name="",
         events=[],
     )
 

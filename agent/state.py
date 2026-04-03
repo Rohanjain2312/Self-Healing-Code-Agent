@@ -11,7 +11,8 @@ Design decisions:
   - max_iterations is set at graph construction time and checked in routing
 """
 
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 
 
 class IterationRecord(TypedDict):
@@ -60,6 +61,12 @@ class AgentState(TypedDict):
     # --- Degradation tracking ---
     # Nodes that used fallback behavior due to LLM schema validation failure
     degraded_nodes: list[str]
+
+    # --- Parallel repair strategies (Fix 14) ---
+    # Each parallel branch appends its result; reducer merges them
+    parallel_repairs: Annotated[list, operator.add]
+    # Which strategy this branch is executing (set by fan_out_repairs Send())
+    strategy_name: str
 
     # --- Event stream (appended by each node for UI streaming) ---
     events: list[dict[str, Any]]

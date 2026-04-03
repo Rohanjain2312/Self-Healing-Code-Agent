@@ -39,6 +39,20 @@ _DEFAULT_FIXTURES: dict[str, dict] = {
         "repair_strategy": "No repair needed in mock mode.",
         "confidence": 0.5,
     },
+    # Fix 6: ReAct loop — mock returns final_diagnosis immediately (no tool use)
+    "debugger_react": {
+        "action": "final_diagnosis",
+        "root_cause": "Placeholder: no actual failure detected in mock mode.",
+        "failure_category": "other",
+        "repair_strategy": "No repair needed in mock mode.",
+        "confidence": 0.5,
+    },
+    # Fix 15: Critic role — mock always approves in development/test mode
+    "critic": {
+        "verdict": "approve",
+        "issues": [],
+        "confidence": 0.9,
+    },
     "memory_summarizer": {
         "lessons": [
             "Always validate empty inputs before processing.",
@@ -69,7 +83,13 @@ class MockProvider(BaseLLMProvider):
 
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
         role = request.metadata.get("role", "generator")
-        payload = self._fixtures.get(role, self._fixtures["generator"])
+        template = request.metadata.get("template_key", "")
+        # Route to role-specific template fixture if available
+        role_template_key = f"{role}_{template}" if template else role
+        if role_template_key in self._fixtures:
+            payload = self._fixtures[role_template_key]
+        else:
+            payload = self._fixtures.get(role, self._fixtures["generator"])
         text = json.dumps(payload)
         return InferenceResponse(
             text=text,

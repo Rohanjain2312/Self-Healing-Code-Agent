@@ -25,6 +25,9 @@ REPAIR_START = "repair_start"
 TIMEOUT = "timeout"
 SPEC_TESTS_GENERATED = "spec_tests_generated"  # Fix 5: spec-blind tests generated
 REPAIR_REVIEW = "repair_review"                 # Fix 12: HITL interrupt payload
+TOOL_USE = "tool_use"                           # Fix 6: debugger tool invocation
+CRITIC_REVIEW = "critic_review"                 # Fix 15: critic verdict
+PARALLEL_REPAIR = "parallel_repair"             # Fix 14: parallel strategy result
 
 
 @dataclass
@@ -116,6 +119,48 @@ def repair_review_event(
             "repair_strategy": repair_strategy,
             "confidence": confidence,
         },
+    )
+
+
+def tool_use_event(
+    tool_name: str,
+    args: dict,
+    result: str,
+    iteration: int = 0,
+) -> AgentEvent:
+    return AgentEvent(
+        type=TOOL_USE,
+        message=f"Tool used: {tool_name}",
+        iteration=iteration,
+        payload={"tool_name": tool_name, "args": args, "result": result[:500]},
+    )
+
+
+def critic_event(
+    verdict: str,
+    issues: list[str],
+    confidence: float,
+    iteration: int = 0,
+) -> AgentEvent:
+    return AgentEvent(
+        type=CRITIC_REVIEW,
+        message=f"Critic verdict: {verdict} (confidence={confidence:.0%})",
+        iteration=iteration,
+        payload={"verdict": verdict, "issues": issues, "confidence": confidence},
+    )
+
+
+def parallel_repair_event(
+    strategy_name: str,
+    spec_passed: bool,
+    adv_passed: bool,
+    iteration: int = 0,
+) -> AgentEvent:
+    return AgentEvent(
+        type=PARALLEL_REPAIR,
+        message=f"Parallel strategy '{strategy_name}': spec={spec_passed} adv={adv_passed}",
+        iteration=iteration,
+        payload={"strategy_name": strategy_name, "spec_passed": spec_passed, "adv_passed": adv_passed},
     )
 
 

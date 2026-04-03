@@ -12,7 +12,7 @@ short_description: Autonomous agent that self-heals Python code errors.
 
 [![Live Demo](https://img.shields.io/badge/🤗%20Live%20Demo-HF%20Spaces-blue)](https://huggingface.co/spaces/rohanjain2312/Self-Healing-Code-Agent)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://www.python.org/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-orange)](https://github.com/langchain-ai/langgraph)
+[![LangGraph](https://img.shields.io/badge/LangGraph-0.3+-orange)](https://github.com/langchain-ai/langgraph)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 ---
@@ -101,64 +101,100 @@ LLM_PROVIDER=mock pytest tests/test_sandbox.py -v
 
 ---
 
-## How It Works + Engineering Concepts
+## Architecture
 
-### Pipeline
+This system has three architectural layers with meaningfully different properties:
+
+### Layer 1: Orchestrated Pipeline (deterministic flow)
+
+The Generator, QA, Executor, and Memory Summarizer nodes run in a fixed order. They are LLM-augmented steps, not autonomous agents — each receives a structured prompt, calls the LLM once, validates the output against a JSON schema, and passes results downstream. The LangGraph state machine handles routing.
+
+### Layer 2: Agentic Investigation (autonomous decision-making)
+
+The Debugger is the one genuinely agentic component. It runs a **ReAct loop**: think → use tool → observe → repeat → conclude. It can invoke three tools before issuing its final diagnosis:
+- `run_snippet`: execute a Python snippet to test an edge-case hypothesis
+- `inspect_function`: parse AST to verify function signatures and docstrings
+- `diff_iterations`: compare code across repair attempts to track convergence
+
+This is where actual autonomous multi-step reasoning happens — the LLM decides which tools to use, in what order, and when to stop investigating.
+
+### Layer 3: Human Oversight (configurable autonomy)
+
+Configurable via `AgentConfig.autonomy_level`:
+- `full_auto` (default): no interrupts — fully autonomous repair loop
+- `review_repairs`: pause before each repair for human approval via `interrupt()`
+- `review_all`: pause before generation AND before each repair
 
 ```
-User Task
-    ↓
-Generator Agent (LLM)
-    ↓
-QA Adversarial Agent → generates edge-case tests
-    ↓
-Execution Sandbox → safe subprocess with timeout
-    ↓
-Failure Detection
-    ↓
-Debugger Agent → structured root cause analysis
-    ↓
-Rolling Memory Summarizer → max 5 bullet lessons
-    ↓
-Repair Loop (back to Generator)
-    ↓
-Success / Max Iterations
+[generate_spec_tests]  ← once (spec-blind oracle tests, if enabled)
+        ↓
+generate_solution      ← generates initial code
+        ↓
+create_adversarial_tests  ← QA hunts for edge cases in the code
+        ↓
+execute_solution       ← runs BOTH spec + adversarial tests in sandbox
+        ↓ (pass) → [critic_review]  ← sanity-checks correctness (if enabled)
+                       ↓ (approve) → END
+                       ↓ (reject) → diagnose_failure
+        ↓ (fail) → diagnose_failure  ← ReAct loop with tools
+                       ↓
+                  update_learning_log
+                       ↓
+                  [review_repair]  ← HITL interrupt() (if not full_auto)
+                       ↓
+                  increment_iteration
+                       ↓
+                  generate_solution  (or fan_out_repairs if parallel_strategies)
 ```
 
-### 4 Specialized LLM Agents
+---
 
-| Agent | Role | Prompt File |
-|-------|------|-------------|
-| Generator | Writes initial code; applies targeted repairs guided by diagnosis | `prompts/generator.yaml` |
-| QA Adversarial | Generates hostile edge-case tests designed to break the solution | `prompts/qa_adversarial.yaml` |
-| Debugger | Structured root-cause analysis — outputs `root_cause`, `failure_category`, `repair_strategy` | `prompts/debugger.yaml` |
-| Memory Summarizer | Compresses iteration history into ≤5 bullet lessons to prevent context overflow | `prompts/memory_summarizer.yaml` |
+## Agent Roles
 
-### Engineering Concepts Demonstrated
+| Role | Type | Description | Prompt |
+|------|------|-------------|--------|
+| Generator | Pipeline node | Writes initial code; applies targeted repairs guided by diagnosis | `generator.yaml` |
+| QA Adversarial | Pipeline node | Generates hostile edge-case tests designed to break the solution | `qa_adversarial.yaml` |
+| Debugger | **ReAct agent** | Root-cause analysis with tool use — runs think/act/observe loop | `debugger.yaml` |
+| Memory Summarizer | Pipeline node | Compresses iteration history into ≤5 bullet lessons | `memory_summarizer.yaml` |
+| Critic | Pipeline node | Sanity-checks passing solutions for correctness issues the tests missed | `critic.yaml` |
+
+---
+
+## Engineering Concepts Demonstrated
 
 | Concept | Implementation |
 |---------|----------------|
-| **Structured outputs + schema validation** | Every LLM call validated against a typed JSON schema; `_coerce_parsed()` handles type mismatches; regex salvage recovers truncated JSON as a last resort |
-| **Prompt engineering + versioning** | 4 YAML prompt files, versioned in git, hot-reloadable — prompts are fully decoupled from agent code |
-| **Token / context management** | Rolling memory summarizer hard-caps at 5 lessons; `max_new_tokens` tuned independently per agent role to balance latency vs. output completeness |
-| **Multi-turn agent reasoning** | LangGraph state machine with conditional routing — task context, generated code, diagnosis, and lessons are all carried forward across up to 4 repair iterations |
-| **Failure detection + self-healing** | Subprocess sandbox captures stdout/stderr with structured output markers → failure summary injected into debugger → targeted repair, not blind rewrite |
-| **Provider-agnostic inference** | Unified LLM router: Ollama (local dev) → HuggingFace Transformers (GPU) → Mock (CI) — agent nodes require zero changes when switching providers |
+| **ReAct agent loop** | Debugger runs think → use tool → observe → repeat before issuing diagnosis |
+| **Dual-oracle testing** | Spec-blind tests (generated before code exists) + adversarial tests (generated after) — both must pass |
+| **Human-in-the-loop** | `interrupt()` pauses the graph for human review; `AgentConfig.autonomy_level` controls when |
+| **Parallel repair strategies** | Fan-out via LangGraph `Send()` — 3 strategies run concurrently, tournament selection picks winner |
+| **Agent self-reflection** | Critic node reviews passing solutions for correctness issues the test suite missed |
+| **Time-travel debugging** | Checkpointer stores all states; `fork_from_iteration()` rewinds and replays with modified state |
+| **Confidence-aware routing** | Low-confidence diagnoses route to blind retry instead of targeted repair |
+| **Structured outputs + schema validation** | Every LLM call validated against a typed JSON schema; coercion + regex salvage handle malformed output |
+| **Prompt engineering + versioning** | YAML prompt files per role, git-versioned, hot-reloadable — decoupled from agent code |
+| **Token / context management** | Rolling memory summarizer (max 5 lessons) + token-aware truncation with re-render |
+| **Provider-agnostic inference** | Unified LLM router: Ollama → HuggingFace → Mock. Per-role model overrides supported |
+| **Observability** | LangSmith tracing (opt-in), per-node metrics, degraded-node tracking, event stream |
 
 ---
 
 ## Benchmark Results
 
 > Run conditions: `llama3` via Ollama, local CPU, max 4 iterations per task. 8 tasks across 6 categories.
+> Reference-validated results use held-out ground-truth test suites not seen by the agent.
 
-| Metric | Result |
-|--------|--------|
-| Tasks evaluated | 8 |
-| First-pass success | 3 / 8 (37%) |
-| Healed after repair | 4 / 5 initially-failing (80%) |
-| Repair effectiveness | 80% |
-| Avg iterations per task | 1.875 |
-| Unresolved | 1 — word frequency with complex tie-breaking logic |
+| Metric | Self-Reported | Reference-Validated |
+|--------|--------------|---------------------|
+| Tasks evaluated | 8 | 8 |
+| First-pass success | 3 / 8 (37%) | — |
+| Healed after repair | 4 / 5 initially-failing (80%) | — |
+| Final success rate | 7 / 8 (87%) | *run with `--validate-reference` to generate* |
+| Avg iterations per task | 1.875 | — |
+| Unresolved | 1 — word frequency with complex tie-breaking | — |
+
+*Self-reported: agent's own generated tests pass. Reference-validated: held-out ground-truth assertions pass.*
 
 | Category | Success |
 |----------|---------|
@@ -176,9 +212,9 @@ Success / Max Iterations
 | Limitation | Why It Happens | How to Overcome |
 |------------|----------------|-----------------|
 | **Slow inference on HF Spaces (30–90s/step)** | Free tier = CPU only, no GPU | Upgrade to HF Spaces Pro (A100) or swap to an API-hosted model via the router |
-| **Schema instability on small models** | 3B models frequently truncate or mis-format JSON — JSON-encoding Python source roughly doubles character count under tight token limits | Use 8B+ model, or an API provider with native function calling / structured output support |
-| **No cross-session memory** | The learning log resets on every new task — lessons from prior runs are not persisted | Add a vector store (ChromaDB, FAISS) to persist and retrieve lessons across sessions |
-| **Single-file execution sandbox** | Subprocess executor runs one file — cannot handle solutions spanning multiple modules | Extend sandbox to write a temp package directory with `__init__.py` and support relative imports |
+| **Schema instability on small models** | 3B models frequently truncate or mis-format JSON — JSON-encoding Python source roughly doubles character count under tight token limits | Use 8B+ model, or an API provider with native structured output support |
+| **No cross-session memory** | The learning log resets on every new task | Add ChromaDB vector store — scaffolded in `agent/memory_store.py`, enable via `AgentConfig.enable_cross_session_memory` |
+| **Single-file execution sandbox** | Subprocess executor runs one file — cannot handle solutions spanning multiple modules | Extend sandbox to write a temp package directory with `__init__.py` |
 
 ---
 
@@ -186,12 +222,12 @@ Success / Max Iterations
 
 | Layer | Technology |
 |-------|-----------|
-| Agent orchestration | LangGraph 0.2+ (async state machine, conditional routing) |
+| Agent orchestration | LangGraph 0.3+ (async state machine, `Send()` fan-out, `interrupt()` HITL, checkpointing) |
 | LLM inference | Llama-3.2-3B-Instruct (HF Spaces) · Llama-3.1-8B (Colab) · Ollama (local) |
 | UI & deployment | Gradio 6.6 · HuggingFace Spaces |
 | Prompt management | YAML templates per agent role, git-versioned, hot-reloadable |
 | Schema validation | jsonschema + custom coercion + regex salvage fallback |
-| Execution sandbox | Python subprocess with wall-clock timeout and structured output markers |
+| Execution sandbox | Python subprocess with rlimit resource limits and structured output markers |
 | Async runtime | asyncio · AnyIO · LangGraph async nodes · async event bus (pub/sub) |
 | Testing | pytest · pytest-asyncio · mock provider (no GPU required) |
 
@@ -209,6 +245,10 @@ All architectural choices, agent interaction patterns, structured output schemas
 
 ```
 agent/          LangGraph state machine and node implementations
+  nodes/        Individual agent nodes (generate, QA, execute, debug, critic, etc.)
+  tools.py      Debugger tools: run_snippet, inspect_function, diff_iterations
+  config.py     AgentConfig — all feature flags in one place
+  metrics.py    Per-node and per-run metrics tracking
 framework/      Async event bus and streaming infrastructure
 llm/            Unified LLM router, providers, prompt loading
   providers/    Ollama, HuggingFace, Mock implementations
@@ -224,7 +264,10 @@ tests/          Pytest test suite (mock provider, no GPU needed)
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_PROVIDER` | auto | `ollama` \| `huggingface` \| `mock` |
-| `OLLAMA_MODEL` | `llama3` | Ollama model name |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Ollama model name |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `HF_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | HuggingFace model ID |
 | `USE_4BIT` | unset | Enable 4-bit quantization |
+| `LANGCHAIN_TRACING_V2` | unset | Enable LangSmith tracing |
+| `LANGCHAIN_API_KEY` | unset | LangSmith API key |
+| `LANGCHAIN_PROJECT` | `self-healing-agent` | LangSmith project name |

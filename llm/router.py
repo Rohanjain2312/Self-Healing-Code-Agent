@@ -97,14 +97,38 @@ class LLMRouter:
     inference, and schema validation into a single async call per node.
     """
 
-    def __init__(self, provider: BaseLLMProvider | None = None) -> None:
+    def __init__(
+        self,
+        provider: BaseLLMProvider | None = None,
+        role_providers: dict[str, BaseLLMProvider] | None = None,
+    ) -> None:
         # Allow explicit injection for testing; otherwise auto-resolve
         self._provider = provider or _resolve_provider()
+        # Per-role provider overrides (Fix 17): roles not in this dict fall back to _provider
+        self._role_providers: dict[str, BaseLLMProvider] = role_providers or {}
         logger.info(
-            "LLMRouter initialized with provider=%s model=%s",
+            "LLMRouter initialized with provider=%s model=%s role_overrides=%s",
             self._provider.provider_name,
             self._provider.model_name,
+            list(self._role_providers),
         )
+
+    def _get_provider(self, role: str) -> BaseLLMProvider:
+        """
+        Return the provider for a given role.
+
+        Checks role_providers first (Fix 17 — per-role model routing).
+        Falls back to the default provider if no override is registered.
+        Logs which model handled each call for observability.
+        """
+        if role in self._role_providers:
+            p = self._role_providers[role]
+            logger.debug(
+                "Role '%s' routed to override provider=%s model=%s",
+                role, p.provider_name, p.model_name,
+            )
+            return p
+        return self._provider
 
     async def call(
         self,
@@ -150,12 +174,12 @@ class LLMRouter:
                 user_prompt=user_prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=min(temperature, 1.0),
-                metadata={"role": role, "attempt": attempt},
+                metadata={"role": role, "template_key": template_key, "attempt": attempt},
             )
 
             try:
                 start = time.monotonic()
-                response = await self._provider.infer(request)
+                response = await self._get_provider(role).infer(request)
                 elapsed = time.monotonic() - start
                 # Token counts: Ollama=real, HuggingFace=-1, Mock=word approx.
                 # Log as-is; consumers must treat -1 as "unknown".
@@ -186,6 +210,52 @@ class LLMRouter:
         raise last_error or StructuredOutputError(
             f"All {_MAX_RETRIES} retries exhausted for role={role}"
         )
+
+    async def get_raw_response(
+        self,
+        role: str,
+        template_key: str,
+        variables: dict[str, Any],
+        max_new_tokens: int = 2048,
+        base_temperature: float = 0.2,
+    ) -> str:
+        """
+        Return the raw LLM response text without schema validation.
+
+        Used by the ReAct debugger loop to receive either a tool-use JSON
+        or a final-diagnosis JSON before deciding which schema to apply.
+
+        Args:
+            role: Agent role matching a YAML file in prompts/
+            template_key: Named template within that YAML
+            variables: Template substitution variables
+            max_new_tokens: Generation length cap
+            base_temperature: Temperature for sampling
+
+        Returns:
+            Raw text string from the LLM provider.
+
+        Raises:
+            RuntimeError: If provider is unreachable.
+        """
+        system_prompt = get_system_prompt(role)
+        raw_template = get_raw_template(role, template_key)
+        rendered = render_template(role, template_key, variables)
+        user_prompt = build_context(rendered, variables, template_str=raw_template)
+
+        request = InferenceRequest(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=base_temperature,
+            metadata={"role": role, "template_key": template_key, "attempt": 0},
+        )
+        response = await self._get_provider(role).infer(request)
+        logger.info(
+            "RAW_CALL role=%s template=%s tokens_in=%d tokens_out=%d",
+            role, template_key, response.input_tokens, response.output_tokens,
+        )
+        return response.text
 
     def _get_fallback(self, role: str, raw_text: str = "") -> dict[str, Any]:
         """
@@ -220,6 +290,13 @@ class LLMRouter:
             return {
                 "updated_lessons": [],
                 "summary": "Memory summarization failed — no lessons extracted.",
+            }
+        if role == "critic":
+            # On failure, approve conservatively — don't force a re-repair cycle
+            return {
+                "verdict": "approve",
+                "issues": [],
+                "confidence": 0.5,
             }
         # Generic fallback for any other role
         return {"error": f"Fallback for role={role}: LLM output was invalid."}
@@ -258,11 +335,11 @@ class LLMRouter:
                 user_prompt=user_prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=min(temperature, 1.0),
-                metadata={"role": role, "attempt": attempt},
+                metadata={"role": role, "template_key": template_key, "attempt": attempt},
             )
             try:
                 start = time.monotonic()
-                response = await self._provider.infer(request)
+                response = await self._get_provider(role).infer(request)
                 elapsed = time.monotonic() - start
                 last_raw = response.text
                 logger.info(
