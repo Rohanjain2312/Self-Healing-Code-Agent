@@ -38,7 +38,7 @@ async def diagnose_failure(
     relevant_history = history[-_MAX_HISTORY_ENTRIES:] if history else []
     iteration_history_text = _format_history(relevant_history)
 
-    result = await router.call(
+    result, used_fallback = await router.call_with_fallback(
         role="debugger",
         template_key="diagnose",
         variables={
@@ -56,9 +56,10 @@ async def diagnose_failure(
     confidence = result.get("confidence", 0.5)
 
     logger.info(
-        "Diagnosis: category=%s confidence=%.2f (iteration=%d)",
+        "Diagnosis: category=%s confidence=%.2f fallback=%s (iteration=%d)",
         failure_category,
         confidence,
+        used_fallback,
         iteration,
     )
 
@@ -69,10 +70,17 @@ async def diagnose_failure(
         iteration=iteration,
     ).to_dict())
 
+    # Track degraded nodes so operators can audit low-quality runs
+    degraded_nodes = list(state.get("degraded_nodes", []))
+    if used_fallback:
+        degraded_nodes.append("diagnose_failure")
+
     return {
         "root_cause": root_cause,
         "failure_category": failure_category,
         "repair_strategy": repair_strategy,
+        "diagnosis_confidence": confidence,
+        "degraded_nodes": degraded_nodes,
         "events": events,
     }
 

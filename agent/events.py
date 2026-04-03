@@ -23,6 +23,8 @@ TESTS_GENERATED = "tests_generated"
 DIAGNOSIS = "diagnosis"
 REPAIR_START = "repair_start"
 TIMEOUT = "timeout"
+SPEC_TESTS_GENERATED = "spec_tests_generated"  # Fix 5: spec-blind tests generated
+REPAIR_REVIEW = "repair_review"                 # Fix 12: HITL interrupt payload
 
 
 @dataclass
@@ -85,6 +87,35 @@ def success_event(code: str, iteration: int = 0) -> AgentEvent:
         message=f"All tests passed on iteration {iteration}",
         iteration=iteration,
         payload={"code": code, "iterations_required": iteration},
+    )
+
+
+def spec_tests_event(test_count: int, iteration: int = 0) -> AgentEvent:
+    return AgentEvent(
+        type=SPEC_TESTS_GENERATED,
+        message=f"Spec-blind tests generated ({test_count} assertions)",
+        iteration=iteration,
+        payload={"test_count": test_count},
+    )
+
+
+def repair_review_event(
+    root_cause: str,
+    failure_category: str,
+    repair_strategy: str,
+    confidence: float,
+    iteration: int = 0,
+) -> AgentEvent:
+    return AgentEvent(
+        type=REPAIR_REVIEW,
+        message="Awaiting human review of repair strategy",
+        iteration=iteration,
+        payload={
+            "root_cause": root_cause,
+            "failure_category": failure_category,
+            "repair_strategy": repair_strategy,
+            "confidence": confidence,
+        },
     )
 
 

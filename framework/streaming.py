@@ -26,6 +26,8 @@ from agent.events import (
     TESTS_GENERATED,
     ITERATION_START,
     TIMEOUT,
+    SPEC_TESTS_GENERATED,
+    REPAIR_REVIEW,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,8 @@ PUBLIC_EVENT_TYPES = {
     SUCCESS,
     DIAGNOSIS,
     TESTS_GENERATED,
+    SPEC_TESTS_GENERATED,
+    REPAIR_REVIEW,
 }
 
 
@@ -71,6 +75,15 @@ def format_event_for_timeline(event: dict[str, Any]) -> str:
     if event_type == TESTS_GENERATED:
         count = payload.get("test_count", "?")
         return f"{prefix} {count} adversarial tests generated."
+
+    if event_type == SPEC_TESTS_GENERATED:
+        count = payload.get("test_count", "?")
+        return f"{prefix} {count} spec-blind oracle tests generated."
+
+    if event_type == REPAIR_REVIEW:
+        category = payload.get("failure_category", "unknown")
+        confidence = payload.get("confidence", 0.0)
+        return f"{prefix} HITL: awaiting human review — [{category}] confidence={confidence:.0%}"
 
     if event_type == FAILURE:
         assertions = payload.get("failed_assertions", [])

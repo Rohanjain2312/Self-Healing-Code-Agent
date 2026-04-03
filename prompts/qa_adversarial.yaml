@@ -36,6 +36,33 @@ schema:
       description: Brief description of each test case. Optional.
 
 templates:
+  generate_from_spec: |
+    ## Task Specification
+    {task_description}
+
+    ## Your Role
+    You are a QA engineer writing tests BEFORE the implementation exists.
+    You have NO access to the code — only the specification above.
+    Write tests that capture what the function SHOULD do, not what any
+    particular implementation happens to do.
+
+    ## Test Requirements
+    Write 8-12 assert statements covering ALL of:
+    - Happy path (normal valid inputs)
+    - Empty input (empty list, empty string, zero)
+    - None values and missing keys where applicable
+    - Single-element collections
+    - Boundary values (touching endpoints, off-by-one)
+    - Negative numbers and zero
+    - Duplicate values
+    - Large or unsorted inputs
+    - Return type correctness
+
+    Each assert must include a descriptive failure message as the second argument.
+
+    Respond with ONLY this JSON object (no other text):
+    {{"test_code": "<your assert statements, one per line with \\n>", "test_cases_description": ["<desc1>", "<desc2>"]}}
+
   generate: |
     ## Task Description
     {task_description}

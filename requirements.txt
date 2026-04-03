@@ -1,5 +1,5 @@
 # Core agent framework
-langgraph>=0.2.0
+langgraph>=0.3.0  # interrupt(), Command, InMemorySaver require 0.3+
 langchain-core>=0.3.0
 
 # Schema validation

@@ -187,6 +187,103 @@ class LLMRouter:
             f"All {_MAX_RETRIES} retries exhausted for role={role}"
         )
 
+    def _get_fallback(self, role: str, raw_text: str = "") -> dict[str, Any]:
+        """
+        Return a safe default response when all retries are exhausted.
+
+        Fallbacks are role-specific and designed to keep the agent running
+        rather than crashing. Nodes that use fallbacks record themselves in
+        state["degraded_nodes"] so operators can audit degraded runs.
+        """
+        if role == "debugger":
+            return {
+                "root_cause": "Unable to diagnose — LLM output was malformed.",
+                "failure_category": "unknown",
+                "repair_strategy": "Regenerate from scratch with a fresh approach.",
+                "confidence": 0.1,
+            }
+        if role == "qa_adversarial":
+            return {
+                "test_code": "assert True  # fallback: QA agent failed to generate tests",
+                "test_cases_description": ["fallback smoke test"],
+            }
+        if role == "generator":
+            # Try to extract code from markdown fences in the raw LLM output
+            import re
+            match = re.search(r"```(?:python)?\n(.*?)```", raw_text, re.DOTALL)
+            code = match.group(1).strip() if match else "# generation failed\ndef placeholder(): pass"
+            return {
+                "code": code,
+                "explanation": "Extracted from raw output (schema validation failed).",
+            }
+        if role == "memory_summarizer":
+            return {
+                "updated_lessons": [],
+                "summary": "Memory summarization failed — no lessons extracted.",
+            }
+        # Generic fallback for any other role
+        return {"error": f"Fallback for role={role}: LLM output was invalid."}
+
+    async def call_with_fallback(
+        self,
+        role: str,
+        template_key: str,
+        variables: dict[str, Any],
+        max_new_tokens: int = 2048,
+        base_temperature: float = 0.2,
+    ) -> tuple[dict[str, Any], bool]:
+        """
+        Like call(), but returns a (result, used_fallback) tuple instead of raising.
+
+        When used_fallback is True, the caller should append its node name to
+        state["degraded_nodes"] so operators can audit which nodes degraded.
+
+        Use this for non-critical roles (debugger, memory_summarizer) where
+        partial / approximate results are acceptable. Generator and QA should
+        use call() directly since their failure is unrecoverable.
+        """
+        # Keep the last raw response text for fallback code extraction
+        last_raw: str = ""
+
+        system_prompt = get_system_prompt(role)
+        schema = get_schema(role)
+        raw_template = get_raw_template(role, template_key)
+        rendered = render_template(role, template_key, variables)
+        user_prompt = build_context(rendered, variables, template_str=raw_template)
+
+        for attempt in range(_MAX_RETRIES):
+            temperature = base_temperature + (attempt * _RETRY_TEMPERATURE_INCREMENT)
+            request = InferenceRequest(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=min(temperature, 1.0),
+                metadata={"role": role, "attempt": attempt},
+            )
+            try:
+                start = time.monotonic()
+                response = await self._provider.infer(request)
+                elapsed = time.monotonic() - start
+                last_raw = response.text
+                logger.info(
+                    "LLM_CALL role=%s tokens_in=%d tokens_out=%d latency=%.2fs attempt=%d",
+                    role, response.input_tokens, response.output_tokens, elapsed, attempt,
+                )
+                result = parse_and_validate(response.text, schema)
+                return result, False  # success — no fallback used
+            except StructuredOutputError as exc:
+                logger.warning(
+                    "role=%s attempt=%d/%d schema validation failed (call_with_fallback): %s",
+                    role, attempt + 1, _MAX_RETRIES, exc,
+                )
+                if attempt < _MAX_RETRIES - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+
+        logger.error(
+            "role=%s all retries exhausted — using fallback response", role
+        )
+        return self._get_fallback(role, last_raw), True
+
     @property
     def provider(self) -> BaseLLMProvider:
         return self._provider

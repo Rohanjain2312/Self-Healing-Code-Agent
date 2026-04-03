@@ -1,21 +1,22 @@
 """
 Python execution sandbox for adversarial test execution.
 
-Design constraints:
-  - Runs in a subprocess to isolate crashes and infinite loops
-  - Enforces a wall-clock timeout (default 15s)
-  - Captures stdout, stderr, and exception tracebacks
-  - Never imports user code into the main process
-  - Restricts dangerous builtins via __builtins__ override in subprocess
+Security layering (innermost → outermost):
+  Layer 1: subprocess isolation — user code never imports into the main process.
+  Layer 2: rlimit resource limits — cap memory (256 MB), CPU time (10 s),
+           and subprocess creation (0 child processes). Applied via preexec_fn
+           on POSIX systems; gracefully skipped on Windows/macOS when unavailable.
+  Layer 3: importlib namespace separation — solution code is loaded as an
+           isolated module; only public names (no leading _) are injected into
+           the test namespace. This prevents tests from coupling to internal
+           helper functions or module-level state.
+  Layer 4 (production hardening): nsjail, Docker, or seccomp BPF. Not included
+           here — this sandbox is appropriate for educational/demo use.
 
-The solution code and test code are concatenated and written to a temp file,
-then executed via subprocess. This avoids exec() in the main process.
-
-Security note: This sandbox is NOT a full security sandbox — it prevents
-accidental hangs and captures output, but does not prevent file I/O or
-network calls from the executed code. For production hardening, wrap with
-nsjail, Docker, or similar. For educational/demo use, the timeout and
-subprocess boundary are sufficient.
+Usage:
+    result = await execute(solution_code="def f(): ...", test_code="assert f() == ...")
+    if not result.passed:
+        print(format_failure_summary(result))
 """
 
 import asyncio
@@ -46,15 +47,37 @@ class ExecutionResult:
     total_count: int = 0
 
 
+# ---------------------------------------------------------------------------
+# Sandbox wrapper script — written to a temp file and executed in subprocess.
+#
+# The solution is loaded as a separate module via importlib so tests cannot
+# accidentally reference implementation internals (leading-_ names are excluded).
+# Public names are injected into the test namespace via globals().
+# ---------------------------------------------------------------------------
 _SANDBOX_WRAPPER = textwrap.dedent("""\
 import sys
+import importlib.util
 import traceback
 
-# Execution harness — wraps user code and test code
+# --- Load solution as an isolated module ---
+_solution_spec = importlib.util.spec_from_file_location("_solution", {solution_path!r})
+_solution_mod = importlib.util.module_from_spec(_solution_spec)
+try:
+    _solution_spec.loader.exec_module(_solution_mod)
+except Exception as _load_ex:
+    print(
+        "SANDBOX_RESULT:EXCEPTION:" + type(_load_ex).__name__ + ":" + str(_load_ex),
+        file=sys.stderr,
+    )
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
 
-{solution_code}
+# Inject only public names into global namespace
+for _name in dir(_solution_mod):
+    if not _name.startswith("_"):
+        globals()[_name] = getattr(_solution_mod, _name)
 
-# --- Adversarial Tests ---
+# --- Execute tests ---
 try:
 {indented_tests}
     print("SANDBOX_RESULT:PASS")
@@ -68,6 +91,27 @@ except Exception as _ex:
 """)
 
 _DEFAULT_TIMEOUT = 15.0  # seconds
+_RESOURCE_LIMITS_AVAILABLE = sys.platform != "win32"
+
+
+def _apply_resource_limits() -> None:
+    """
+    Apply POSIX rlimits to cap resource usage in the sandbox subprocess.
+
+    Called as preexec_fn — runs inside the child process after fork().
+    Silently skipped if the resource module is unavailable (e.g. Windows).
+    """
+    try:
+        import resource
+        # 256 MB virtual address space
+        resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+        # 10 seconds CPU time
+        resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
+        # No child processes (prevents fork bombs)
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+    except (ImportError, AttributeError, ValueError):
+        # resource module absent (Windows) or limit not supported on this OS
+        pass
 
 
 async def execute(
@@ -78,59 +122,78 @@ async def execute(
     """
     Execute solution_code + test_code in an isolated subprocess.
 
+    The solution and tests are written to separate temp files. The solution is
+    loaded as an isolated module via importlib so tests are namespace-separated.
+
     Returns ExecutionResult regardless of outcome — never raises.
     The caller (agent node) decides how to handle failures.
     """
     import time
 
-    # Indent test code so it sits inside the try block in the wrapper
-    indented_tests = textwrap.indent(test_code.strip(), "    ")
+    solution_tmp: str | None = None
+    wrapper_tmp: str | None = None
 
-    script = _SANDBOX_WRAPPER.format(
-        solution_code=solution_code.strip(),
-        indented_tests=indented_tests,
-    )
-
-    # Write to a temporary file — avoids shell injection via -c flag
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8"
-    ) as tmp:
-        tmp.write(script)
-        tmp_path = tmp.name
-
-    start = time.monotonic()
     try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            tmp_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # Write solution to its own temp file (loaded as isolated module)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as sol_f:
+            sol_f.write(solution_code.strip() if solution_code.strip() else "# empty solution")
+            solution_tmp = sol_f.name
+
+        # Indent test code for the try block in the wrapper
+        indented_tests = textwrap.indent(test_code.strip() if test_code.strip() else "pass", "    ")
+
+        wrapper_script = _SANDBOX_WRAPPER.format(
+            solution_path=solution_tmp,
+            indented_tests=indented_tests,
         )
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as wrap_f:
+            wrap_f.write(wrapper_script)
+            wrapper_tmp = wrap_f.name
+
+        preexec = _apply_resource_limits if _RESOURCE_LIMITS_AVAILABLE else None
+
+        start = time.monotonic()
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                wrapper_tmp,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                preexec_fn=preexec,
             )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return ExecutionResult(
-                passed=False,
-                stdout="",
-                stderr=f"EXECUTION TIMEOUT after {timeout}s",
-                exception_type="TimeoutError",
-                exception_message=f"Execution exceeded {timeout} second limit",
-                elapsed_seconds=timeout,
-            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return ExecutionResult(
+                    passed=False,
+                    stdout="",
+                    stderr=f"EXECUTION TIMEOUT after {timeout}s",
+                    exception_type="TimeoutError",
+                    exception_message=f"Execution exceeded {timeout} second limit",
+                    elapsed_seconds=timeout,
+                )
+        finally:
+            elapsed = time.monotonic() - start
+
     finally:
-        elapsed = time.monotonic() - start
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        for path in [solution_tmp, wrapper_tmp]:
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
-
     return _parse_result(stdout, stderr, elapsed)
 
 
@@ -143,8 +206,6 @@ def _parse_result(stdout: str, stderr: str, elapsed: float) -> ExecutionResult:
       SANDBOX_RESULT:FAIL:<message>
       SANDBOX_RESULT:EXCEPTION:<type>:<message>
     """
-    combined = stdout + stderr
-
     if "SANDBOX_RESULT:PASS" in stdout:
         return ExecutionResult(
             passed=True,

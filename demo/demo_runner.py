@@ -24,7 +24,7 @@ from framework.streaming import (
     extract_latest_code,
     PUBLIC_EVENT_TYPES,
 )
-from agent.events import SUCCESS, FAILURE, CODE_GENERATED, LEARNING_UPDATE
+from agent.events import SUCCESS, FAILURE, CODE_GENERATED, LEARNING_UPDATE, REPAIR_REVIEW
 from llm.router import LLMRouter
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,17 @@ class DemoUIState:
         if event_type == SUCCESS:
             self.is_complete = True
             self.final_status = "success"
+
+        if event_type == REPAIR_REVIEW:
+            # HITL pause — surface the interrupt payload in the timeline.
+            # Full interrupt/resume flow is handled by the async demo when
+            # autonomy_level != "full_auto".
+            payload = event.get("payload", {})
+            self.timeline_lines.append(
+                f"[HITL] Repair review requested — "
+                f"category={payload.get('failure_category', '?')} "
+                f"confidence={payload.get('confidence', 0):.0%}"
+            )
 
     def timeline_text(self) -> str:
         return "\n".join(self.timeline_lines) if self.timeline_lines else "Waiting for agent..."
