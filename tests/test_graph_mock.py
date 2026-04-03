@@ -27,7 +27,7 @@ async def test_agent_runs_to_completion_with_mock():
 
     assert final_state is not None
     assert "status" in final_state
-    assert final_state["status"] in {"success", "max_iterations_reached", "running"}
+    assert final_state["status"] in {"success", "max_iterations_reached"}
     assert "current_code" in final_state
     assert isinstance(final_state["events"], list)
     assert len(final_state["events"]) > 0
@@ -77,4 +77,4 @@ async def test_max_iterations_terminates():
         router=router,
     )
     # Status must be one of the terminal values
-    assert final_state["status"] in {"success", "max_iterations_reached", "running"}
+    assert final_state["status"] in {"success", "max_iterations_reached"}

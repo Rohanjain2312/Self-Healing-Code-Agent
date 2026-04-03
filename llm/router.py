@@ -16,14 +16,22 @@ Provider selection priority:
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 from .base import BaseLLMProvider, InferenceRequest
-from .prompt_loader import get_system_prompt, get_schema, render_template
+from .prompt_loader import get_system_prompt, get_schema, render_template, get_raw_template
 from .context_builder import build_context
 from .schema_validator import parse_and_validate, StructuredOutputError
 
 logger = logging.getLogger(__name__)
+
+# Enable LangSmith tracing when LANGCHAIN_TRACING_V2 is set in the environment.
+# All other LangSmith configuration (API key, endpoint) is also read from env vars.
+_LANGSMITH_ENABLED = bool(os.environ.get("LANGCHAIN_TRACING_V2"))
+if _LANGSMITH_ENABLED:
+    os.environ.setdefault("LANGCHAIN_PROJECT", "self-healing-agent")
+    logger.info("LangSmith tracing enabled — project=%s", os.environ["LANGCHAIN_PROJECT"])
 
 _MAX_RETRIES = 3
 _RETRY_TEMPERATURE_INCREMENT = 0.1  # raise temp on retry to escape degenerate outputs
@@ -128,8 +136,9 @@ class LLMRouter:
         """
         system_prompt = get_system_prompt(role)
         schema = get_schema(role)
+        raw_template = get_raw_template(role, template_key)
         rendered = render_template(role, template_key, variables)
-        user_prompt = build_context(rendered, variables)
+        user_prompt = build_context(rendered, variables, template_str=raw_template)
 
         last_error: StructuredOutputError | None = None
 
@@ -145,13 +154,18 @@ class LLMRouter:
             )
 
             try:
+                start = time.monotonic()
                 response = await self._provider.infer(request)
-                logger.debug(
-                    "role=%s attempt=%d input_tokens=%d output_tokens=%d",
+                elapsed = time.monotonic() - start
+                # Token counts: Ollama=real, HuggingFace=-1, Mock=word approx.
+                # Log as-is; consumers must treat -1 as "unknown".
+                logger.info(
+                    "LLM_CALL role=%s tokens_in=%d tokens_out=%d latency=%.2fs attempt=%d",
                     role,
-                    attempt,
                     response.input_tokens,
                     response.output_tokens,
+                    elapsed,
+                    attempt,
                 )
                 result = parse_and_validate(response.text, schema)
                 return result

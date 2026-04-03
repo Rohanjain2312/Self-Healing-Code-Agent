@@ -1,0 +1,1329 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<prompt>
+
+<meta>
+  <title>Self-Healing Code Agent — 19-Fix Upgrade Implementation</title>
+  <description>
+    A structured implementation plan to transform the Self-Healing Code Agent from a well-engineered
+    LLM pipeline into a genuine agentic AI system. This prompt contains 19 fixes organized into
+    4 phases. Each fix includes the problem description, the exact files to modify or create,
+    reference code, and tests to add. Implement each fix sequentially within its phase, and run
+    tests after each fix to verify nothing is broken.
+  </description>
+  <repo>https://github.com/Rohanjain2312/Self-Healing-Code-Agent</repo>
+  <project_directory>/Users/rohanjain/Desktop/UMD - MSML/Sem 4/Self-Healing-Code-Agent</project_directory>
+  <language>Python 3.11+</language>
+  <framework>LangGraph 0.2+, Gradio 6.6, asyncio</framework>
+</meta>
+
+<project_context>
+  <current_structure>
+    agent/               — LangGraph state machine and node implementations
+      __init__.py
+      events.py          — Event dataclass and event constructors
+      graph.py           — Graph topology: build_graph(), run_agent(), stream_agent()
+      state.py           — AgentState TypedDict, IterationRecord
+      nodes/
+        __init__.py
+        generate_solution.py     — Generator node (initial + repair)
+        create_adversarial_tests.py  — QA adversarial node
+        execute_solution.py      — Sandbox execution node
+        diagnose_failure.py      — Debugger diagnosis node
+        update_learning_log.py   — Memory summarizer node
+    framework/           — Async event bus and streaming
+      event_bus.py
+      streaming.py
+    llm/                 — LLM router, providers, prompt loading
+      base.py            — BaseLLMProvider, InferenceRequest, InferenceResponse
+      context_builder.py — Token-aware context builder (HAS A BUG — Fix 1)
+      prompt_loader.py   — YAML prompt loader
+      router.py          — LLMRouter: prompt → infer → validate pipeline
+      schema_validator.py — JSON parse + jsonschema validation + coercion
+      providers/
+        ollama_provider.py
+        hf_provider.py
+        mock_provider.py
+    sandbox/
+      python_executor.py — Subprocess-based code execution sandbox
+    prompts/             — YAML prompt templates per agent role
+      generator.yaml
+      qa_adversarial.yaml
+      debugger.yaml
+      memory_summarizer.yaml
+    evaluation/
+      benchmark_tasks.py — 8 BenchmarkTask definitions
+      metrics.py         — TaskResult, compute_summary, save_results
+      run_benchmark.py   — Benchmark runner
+      results.json       — Precomputed results
+    demo/
+      app.py             — Gradio UI
+      demo_runner.py
+    tests/
+      test_event_bus.py
+      test_graph_mock.py
+      test_prompt_loader.py
+      test_sandbox.py
+      test_schema_validator.py
+    .github/workflows/
+      sync_to_hf.yml     — Only CI: pushes to HuggingFace (no tests)
+    app.py               — Entry point
+    requirements.txt
+    project_map.md
+  </current_structure>
+
+  <current_graph_topology>
+    generate_solution → create_adversarial_tests → execute_solution
+      → (pass) END
+      → (fail, iterations remaining) diagnose_failure → update_learning_log → increment_iteration → generate_solution
+      → (fail, max iterations) END
+  </current_graph_topology>
+</project_context>
+
+<global_rules>
+  <rule>Implement fixes in the order listed within each phase.</rule>
+  <rule>Run `LLM_PROVIDER=mock pytest -v` after each fix to confirm nothing is broken.</rule>
+  <rule>Maintain backward compatibility — existing mock tests must continue passing.</rule>
+  <rule>All new code must include docstrings explaining the design decision.</rule>
+  <rule>All new features must be optional and configurable — never break the default "development" flow.</rule>
+  <rule>Use type hints throughout. Use `dict[str, Any]` style (Python 3.11+), not `Dict[str, Any]`.</rule>
+  <rule>Add each new dependency to requirements.txt.</rule>
+  <rule>Never hardcode API keys or secrets. Use environment variables.</rule>
+  <rule>When creating new files, follow the existing code style: docstrings at module level explaining design decisions, logging via `logging.getLogger(__name__)`, async functions for all node implementations.</rule>
+</global_rules>
+
+<cross_cutting_concerns>
+  <concern name="Event Types and Streaming">
+    Multiple fixes add new nodes that emit events. For each new node, you MUST also update:
+
+    1. agent/events.py — Add new event type constants and constructor helpers:
+       - SPEC_TESTS_GENERATED = "spec_tests_generated" (Fix 5)
+       - CRITIC_REVIEW = "critic_review" (Fix 15)
+       - REPAIR_REVIEW = "repair_review" (Fix 12)
+       - PARALLEL_REPAIR = "parallel_repair" (Fix 14)
+       - TOOL_USE = "tool_use" (Fix 6)
+       Add corresponding constructor helpers following the existing pattern (e.g. spec_tests_event(), critic_event()).
+
+    2. framework/streaming.py — Add new event types to the PUBLIC_EVENT_TYPES set.
+       Add format_event_for_timeline() handlers for each new type. Import the new constants from agent.events.
+
+    3. demo/demo_runner.py — Update DemoUIState.apply_event() to handle new event types
+       (display critic verdict, show tool use actions, indicate HITL pause).
+
+    Apply these updates alongside the fix that introduces each new node, not as a separate step.
+  </concern>
+
+  <concern name="Token Count Handling">
+    The Ollama provider returns real token counts. The HuggingFace provider returns -1 for both
+    input_tokens and output_tokens. The Mock provider returns word-count approximations.
+    All metrics code must handle -1 gracefully — treat as "unknown" in aggregations, not zero.
+  </concern>
+</cross_cutting_concerns>
+
+<!-- ============================================================ -->
+<!-- PHASE 1: ELIMINATE EMBARRASSMENTS                            -->
+<!-- ============================================================ -->
+<phase id="1" name="Eliminate Embarrassments" estimated_hours="10-12">
+
+  <fix id="1" title="Fix the Context Builder Bug" estimated_time="30 minutes" priority="critical">
+    <problem>
+      In llm/context_builder.py, the build_context() function computes trimmed_vars by truncating
+      large variable fields, but then returns the ORIGINAL rendered_template unchanged. The
+      trimmed_vars dict is never used to re-render. The truncation logic is dead code.
+    </problem>
+    <files_to_modify>
+      <file path="llm/context_builder.py" action="modify">
+        <what_to_change>
+          1. Add a new parameter `template_str: str = ""` to build_context() — this receives the
+             raw template string before variable substitution.
+          2. After computing trimmed_vars, RE-RENDER using the template_str with the truncated
+             variables instead of returning the original rendered_template.
+          3. Add a fallback for when template_str is not provided: do string replacement of the
+             original variable values with the truncated values in the rendered_template.
+        </what_to_change>
+        <reference_code><![CDATA[
+def build_context(
+    rendered_template: str,
+    variables: dict[str, Any],
+    template_str: str = "",
+    max_context_tokens: int = _DEFAULT_MAX_TOKENS,
+) -> str:
+    total_tokens = _estimate_tokens(rendered_template)
+    if total_tokens <= max_context_tokens:
+        return rendered_template
+
+    truncation_candidates = [
+        "test_results", "iteration_history", "current_code",
+        "code", "learning_log", "prior_lessons",
+    ]
+
+    trimmed_vars = dict(variables)
+    for field in truncation_candidates:
+        if field not in trimmed_vars:
+            continue
+        original = str(trimmed_vars[field])
+        field_budget = max_context_tokens // 2
+        trimmed_vars[field] = _truncate_to_tokens(original, field_budget)
+
+    # ACTUALLY RE-RENDER with truncated variables
+    if template_str:
+        re_rendered = template_str.format(**trimmed_vars)
+    else:
+        re_rendered = rendered_template
+        for field, value in trimmed_vars.items():
+            original = str(variables.get(field, ""))
+            if original != str(value):
+                re_rendered = re_rendered.replace(original, str(value))
+
+    return re_rendered
+]]></reference_code>
+      </file>
+      <file path="llm/prompt_loader.py" action="modify">
+        <what_to_change>
+          Add a get_raw_template(role, template_key) function that returns the raw template
+          string BEFORE variable substitution. The router needs this for build_context().
+          Implementation: load the YAML, access templates[template_key], return it directly.
+        </what_to_change>
+        <reference_code><![CDATA[
+def get_raw_template(role: str, template_key: str) -> str:
+    """Return the raw template string before variable substitution."""
+    data = _load_yaml(role)
+    templates = data.get("templates", {})
+    if template_key not in templates:
+        available = list(templates.keys())
+        raise KeyError(f"Template '{template_key}' not found for role '{role}'. Available: {available}")
+    return templates[template_key]
+]]></reference_code>
+      </file>
+      <file path="llm/router.py" action="modify">
+        <what_to_change>
+          Update the call() method to:
+          1. Import and call get_raw_template() alongside render_template()
+          2. Pass the raw template string as template_str to build_context()
+        </what_to_change>
+      </file>
+    </files_to_modify>
+    <tests_to_add>
+      <file path="tests/test_context_builder.py" action="create">
+        <reference_code><![CDATA[
+"""Tests for context builder — verifies truncation actually applies."""
+import pytest
+from llm.context_builder import build_context
+
+def test_truncation_actually_applies():
+    huge_var = "x" * 50000
+    template = "Code: {code}"
+    rendered = template.format(code=huge_var)
+    result = build_context(rendered, {"code": huge_var}, template_str=template, max_context_tokens=100)
+    assert len(result) < len(rendered)
+    assert "TRUNCATED" in result
+
+def test_no_truncation_when_within_budget():
+    small_var = "def f(): pass"
+    template = "Code: {code}"
+    rendered = template.format(code=small_var)
+    result = build_context(rendered, {"code": small_var}, template_str=template, max_context_tokens=5000)
+    assert result == rendered
+
+def test_truncation_without_template_str_fallback():
+    huge_var = "x" * 50000
+    rendered = f"Code: {huge_var}"
+    result = build_context(rendered, {"code": huge_var}, max_context_tokens=100)
+    assert len(result) < len(rendered)
+]]></reference_code>
+      </file>
+    </tests_to_add>
+  </fix>
+
+  <fix id="2" title="Add Held-Out Reference Tests to the Benchmark" estimated_time="2-3 hours" priority="high">
+    <problem>
+      The benchmark reports "80% repair effectiveness" but only checks whether the agent's OWN
+      generated tests pass. The reference_tests field exists in BenchmarkTask but is never
+      populated or used. The metric is circular and meaningless.
+    </problem>
+    <files_to_modify>
+      <file path="evaluation/benchmark_tasks.py" action="modify">
+        <what_to_change>
+          1. Add a new field `reference_test_code: str = ""` to the BenchmarkTask dataclass.
+          2. Populate reference_test_code for ALL 8 existing tasks with comprehensive ground-truth
+             assert statements. Each task should have 5-10 reference tests covering edge cases
+             the QA agent might miss.
+          3. Reference tests must be executable Python assert statements that test the function
+             defined by the task description.
+        </what_to_change>
+        <guidance>
+          Write thorough reference tests for each of the 8 tasks:
+          - interval_merge_001: empty, single, touching, overlapping, contained, unsorted
+          - csv_normalize_001: missing keys, None values, partial phone strings, whitespace
+          - log_dedup_001: order preservation, whitespace, duplicates, empty input
+          - flatten_nested_001: strings not flattened, None preserved, empty nested, mixed types
+          - word_frequency_001: case insensitive, punctuation, ties, apostrophes, k > unique
+          - range_compression_001: dedup, single element, consecutive, non-consecutive
+          - safe_divide_001: zero, -0.0, inf, -inf, nan, normal division
+          - anagram_groups_001: case insensitive, deterministic ordering, non-alpha chars, empty
+        </guidance>
+      </file>
+      <file path="evaluation/run_benchmark.py" action="modify">
+        <what_to_change>
+          1. Add an async function validate_against_reference(task, final_code) that runs the
+             agent's final code against the task's reference_test_code using sandbox.python_executor.execute.
+          2. Call validate_against_reference in _extract_task_result after the agent completes.
+          3. Add reference_test_passed: bool field to TaskResult.
+          4. Update compute_summary to report both self_reported_success and reference_validated_success.
+        </what_to_change>
+        <reference_code><![CDATA[
+async def validate_against_reference(task: BenchmarkTask, final_code: str) -> bool | None:
+    """Run the agent's final code against held-out reference tests."""
+    if not task.reference_test_code:
+        return None
+    from sandbox.python_executor import execute
+    result = await execute(
+        solution_code=final_code,
+        test_code=task.reference_test_code,
+    )
+    return result.passed
+]]></reference_code>
+      </file>
+      <file path="evaluation/metrics.py" action="modify">
+        <what_to_change>
+          Add reference_test_passed: bool | None = None to TaskResult.
+          Update compute_summary to calculate reference_validated_success and
+          repair_effectiveness_validated alongside existing metrics.
+          Update save_results to include both metric sets.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="3" title="Fix the Test Suite" estimated_time="3-4 hours" priority="high">
+    <problem>
+      397 lines of tests, all using the mock provider. They verify plumbing, not behavior. No
+      edge case coverage for schema validation, no error recovery testing, no sandbox security tests.
+      The terminal status assertion accepts "running" as valid, which is wrong.
+    </problem>
+    <files_to_modify>
+      <file path="tests/test_schema_validator.py" action="modify">
+        <what_to_change>
+          IMPORTANT: The existing file already tests markdown fences, prose prefix, invalid JSON,
+          and nested dict coercion. Do NOT duplicate. Only add genuinely new tests:
+          - test_truncated_json_salvages_code: Truncated JSON where _salvage_code_field kicks in
+          - test_multiple_json_objects_extracts_first: Multiple JSON objects, extract first
+          - test_code_with_escaped_quotes: Code containing escaped quotes
+          Use _SIMPLE_SCHEMA already defined in the file.
+        </what_to_change>
+        <reference_code><![CDATA[
+def test_truncated_json_salvages_code():
+    """Simulates max_new_tokens cutting off the JSON mid-way."""
+    raw = '{"code": "def add(a,b):\\n    return a+b\\n", "explanation": "adds tw'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert "def add" in result["code"]
+
+def test_multiple_json_objects_extracts_first():
+    """When model outputs explanation then JSON then more text."""
+    raw = 'Let me think... {"code": "x = 1"} That should work. {"code": "x = 2"}'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert result["code"] == "x = 1"
+
+def test_code_with_escaped_quotes():
+    """Code containing escaped quotes inside JSON string."""
+    raw = '{"code": "def f():\\n    return \\"hello\\"\\n", "explanation": "returns string"}'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert '\\"hello\\"' in result["code"] or '"hello"' in result["code"]
+]]></reference_code>
+      </file>
+      <file path="tests/test_sandbox.py" action="modify">
+        <what_to_change>
+          IMPORTANT: test_timeout_enforcement already exists (tests infinite loop via while True).
+          Do NOT duplicate. Only add genuinely new tests:
+          - test_memory_bomb_handled: allocate ~1GB, should fail
+          - test_import_error_captured: import nonexistent module, should be captured
+          - test_solution_and_test_code_both_empty: edge case with empty inputs
+        </what_to_change>
+        <reference_code><![CDATA[
+@pytest.mark.asyncio
+async def test_memory_bomb_handled():
+    result = await execute("x = 'a' * (10**9)", "assert True", timeout=5.0)
+    assert not result.passed
+
+@pytest.mark.asyncio
+async def test_import_error_captured():
+    result = await execute("import nonexistent_module_xyz", "assert True")
+    assert not result.passed
+    assert "ModuleNotFoundError" in result.exception_type or "ModuleNotFoundError" in result.stderr
+
+@pytest.mark.asyncio
+async def test_solution_and_test_code_both_empty():
+    result = await execute("", "pass")
+    assert result.passed
+]]></reference_code>
+      </file>
+      <file path="tests/test_router.py" action="create">
+        <what_to_change>
+          Create a new test file for router retry behavior:
+          - test_router_retries_on_schema_failure: Provider returns garbage twice then valid JSON.
+            Verify router retries and succeeds on third attempt.
+          - test_router_raises_after_max_retries: Provider always returns garbage.
+            Verify StructuredOutputError is raised after 3 attempts.
+        </what_to_change>
+        <reference_code><![CDATA[
+"""Tests for LLM Router retry and fallback behavior."""
+import pytest
+from llm.router import LLMRouter
+from llm.base import BaseLLMProvider, InferenceRequest, InferenceResponse
+from llm.schema_validator import StructuredOutputError
+
+class BadThenGoodProvider(BaseLLMProvider):
+    def __init__(self):
+        self.call_count = 0
+
+    @property
+    def provider_name(self) -> str:
+        return "test"
+
+    @property
+    def model_name(self) -> str:
+        return "test"
+
+    async def infer(self, request: InferenceRequest) -> InferenceResponse:
+        self.call_count += 1
+        if self.call_count < 3:
+            return InferenceResponse(text="not json", provider="test", model="test")
+        return InferenceResponse(
+            text='{"code":"def f(): pass","explanation":"ok"}',
+            provider="test", model="test"
+        )
+
+class AlwaysBadProvider(BaseLLMProvider):
+    @property
+    def provider_name(self) -> str:
+        return "test"
+
+    @property
+    def model_name(self) -> str:
+        return "test"
+
+    async def infer(self, request: InferenceRequest) -> InferenceResponse:
+        return InferenceResponse(text="garbage", provider="test", model="test")
+
+@pytest.mark.asyncio
+async def test_router_retries_on_schema_failure():
+    provider = BadThenGoodProvider()
+    router = LLMRouter(provider=provider)
+    result = await router.call(
+        role="generator", template_key="initial",
+        variables={"task_description": "test", "learning_log": ""}
+    )
+    assert provider.call_count == 3
+    assert "def f" in result["code"]
+
+@pytest.mark.asyncio
+async def test_router_raises_after_max_retries():
+    router = LLMRouter(provider=AlwaysBadProvider())
+    with pytest.raises(StructuredOutputError):
+        await router.call(
+            role="generator", template_key="initial",
+            variables={"task_description": "test", "learning_log": ""}
+        )
+]]></reference_code>
+      </file>
+      <file path="tests/test_graph_mock.py" action="modify">
+        <what_to_change>
+          Fix the terminal status assertion. Change all instances of:
+            assert final_state["status"] in {"success", "max_iterations_reached", "running"}
+          to:
+            assert final_state["status"] in {"success", "max_iterations_reached"}
+          The status "running" should never be a terminal state.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="4" title="Add LangSmith Observability" estimated_time="2-3 hours" priority="high">
+    <problem>
+      No tracing, no cost tracking, no latency per node. For a finance-focused role, this is a gap.
+    </problem>
+    <files_to_modify>
+      <file path="llm/router.py" action="modify">
+        <what_to_change>
+          1. Add LangSmith environment variable detection at module level.
+          2. Add elapsed time measurement around each inference call.
+          3. Add structured logging of role, tokens, latency, and attempt number.
+          NOTE: Ollama returns real token counts, HuggingFace returns -1, Mock returns approximations.
+          Log whatever the provider returns; the metrics module handles -1 gracefully.
+        </what_to_change>
+        <reference_code><![CDATA[
+import os
+import time
+
+_LANGSMITH_ENABLED = bool(os.environ.get("LANGCHAIN_TRACING_V2"))
+if _LANGSMITH_ENABLED:
+    os.environ.setdefault("LANGCHAIN_PROJECT", "self-healing-agent")
+
+# Inside call(), around the inference:
+start = time.monotonic()
+response = await self._provider.infer(request)
+elapsed = time.monotonic() - start
+logger.info(
+    "LLM_CALL role=%s tokens_in=%d tokens_out=%d latency=%.2fs attempt=%d",
+    role, response.input_tokens, response.output_tokens, elapsed, attempt
+)
+]]></reference_code>
+      </file>
+      <file path="agent/metrics.py" action="create">
+        <what_to_change>
+          Create a metrics module with NodeMetrics and RunMetrics dataclasses.
+          NodeMetrics tracks: node_name, start_time, end_time, input_tokens, output_tokens,
+          llm_calls, retries, errors, with properties for latency_seconds and estimated_cost_usd.
+          RunMetrics aggregates NodeMetrics across a full agent run with a to_dict() method.
+        </what_to_change>
+        <reference_code><![CDATA[
+"""Per-node and per-run metrics for observability and cost tracking."""
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+@dataclass
+class NodeMetrics:
+    node_name: str
+    start_time: float = 0.0
+    end_time: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    llm_calls: int = 0
+    retries: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def latency_seconds(self) -> float:
+        return self.end_time - self.start_time
+
+    @property
+    def estimated_cost_usd(self) -> float:
+        return (self.input_tokens * 0.00015 + self.output_tokens * 0.0006) / 1000
+
+@dataclass
+class RunMetrics:
+    task_id: str
+    total_latency: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_llm_calls: int = 0
+    node_metrics: list[NodeMetrics] = field(default_factory=list)
+    total_retries: int = 0
+
+    @property
+    def estimated_total_cost_usd(self) -> float:
+        return sum(n.estimated_cost_usd for n in self.node_metrics)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "total_latency_s": round(self.total_latency, 2),
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_llm_calls": self.total_llm_calls,
+            "total_retries": self.total_retries,
+            "estimated_cost_usd": round(self.estimated_total_cost_usd, 6),
+            "nodes": [
+                {"name": n.node_name, "latency_s": round(n.latency_seconds, 2),
+                 "tokens_in": n.input_tokens, "tokens_out": n.output_tokens}
+                for n in self.node_metrics
+            ],
+        }
+]]></reference_code>
+      </file>
+      <file path="evaluation/run_benchmark.py" action="modify">
+        <what_to_change>
+          Include per-task metrics in results.json output. After each task completes, record
+          total_latency, total_tokens, estimated_cost alongside the existing success/failure data.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="11" title="Add a CI Pipeline That Actually Tests" estimated_time="1 hour" priority="high">
+    <problem>
+      The only CI workflow is sync_to_hf.yml which pushes to HuggingFace. There are no
+      automated tests running on push or PR.
+    </problem>
+    <files_to_modify>
+      <file path=".github/workflows/test.yml" action="create">
+        <reference_code><![CDATA[
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run tests
+        env:
+          LLM_PROVIDER: mock
+        run: pytest -v --tb=short
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check .
+]]></reference_code>
+      </file>
+    </files_to_modify>
+  </fix>
+
+</phase>
+
+<!-- ============================================================ -->
+<!-- PHASE 2: PRODUCTION THINKING                                 -->
+<!-- ============================================================ -->
+<phase id="2" name="Production Thinking" estimated_hours="16-20">
+
+  <fix id="5" title="Make the QA Agent Actually Adversarial — Dual-Oracle Testing" estimated_time="4-6 hours" priority="critical">
+    <problem>
+      The QA agent reads the implementation and generates tests that validate what the code DOES,
+      not what it SHOULD do. The system can converge on a confidently wrong solution that passes
+      its own tests. There is no oracle.
+    </problem>
+    <files_to_modify>
+      <file path="prompts/qa_adversarial.yaml" action="modify">
+        <what_to_change>
+          Add a new template called "generate_from_spec" that generates tests from the task
+          description ONLY, without seeing any code. This template should instruct the LLM to
+          act as a QA engineer writing tests BEFORE implementation, based solely on the specification.
+          It should generate 8-12 assert statements covering happy path, empty inputs, None,
+          single elements, boundaries, negatives, zero, duplicates, and large inputs.
+        </what_to_change>
+      </file>
+      <file path="agent/state.py" action="modify">
+        <what_to_change>
+          Add two new fields to AgentState:
+          - spec_test_code: str (generated once from task description, blind to code)
+          - adversarial_test_code: str (generated per iteration, sees the code)
+          Rename the existing current_test_code usages to adversarial_test_code, or keep
+          current_test_code as an alias for backward compatibility.
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/generate_spec_tests.py" action="create">
+        <what_to_change>
+          Create a new node that generates specification-based tests. This node:
+          1. Calls router.call() with role="qa_adversarial", template_key="generate_from_spec"
+          2. Only passes task_description as a variable (NO code)
+          3. Returns {"spec_test_code": result["test_code"]}
+          4. Only runs at iteration 0 (checked in the graph wiring, not in the node itself)
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/execute_solution.py" action="modify">
+        <what_to_change>
+          Update execute_solution to run BOTH test suites:
+          1. Run spec tests: execute(current_code, spec_test_code)
+          2. Run adversarial tests: execute(current_code, adversarial_test_code)
+          3. Both must pass for overall success
+          4. Failure summary should clearly separate "SPEC TEST FAILURES" from "ADVERSARIAL TEST FAILURES"
+          Handle the case where spec_test_code is empty (when spec tests are disabled).
+        </what_to_change>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          Add the generate_spec_tests node to the graph.
+          Wire it as the entry point (before generate_solution) when spec tests are enabled.
+          The flow becomes: generate_spec_tests → generate_solution → create_adversarial_tests → execute_solution
+          On repair iterations, skip generate_spec_tests (it only runs once).
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="7" title="Add Graceful Degradation and Error Recovery" estimated_time="3-4 hours" priority="high">
+    <problem>
+      If schema validation fails 3 times in a row, router.call() raises StructuredOutputError
+      and the entire agent run crashes. No fallback behavior, no partial results.
+    </problem>
+    <files_to_modify>
+      <file path="llm/router.py" action="modify">
+        <what_to_change>
+          1. Add a call_with_fallback() method that wraps call() in a try/except.
+          2. Add a _get_fallback(role, raw_text) method that returns safe defaults per role:
+             - debugger: generic diagnosis with confidence=0.1
+             - qa_adversarial: fallback smoke test "assert True"
+             - generator: attempt to extract code from markdown fences in raw_text
+             - memory_summarizer: generic "no lessons extracted" message
+          3. Nodes should use call_with_fallback() for non-critical roles (debugger, memory_summarizer).
+             Generator and QA should still use call() since their failure is truly unrecoverable.
+        </what_to_change>
+      </file>
+      <file path="agent/state.py" action="modify">
+        <what_to_change>
+          Add `degraded_nodes: list[str]` field to AgentState to track which nodes used fallback behavior.
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/diagnose_failure.py" action="modify">
+        <what_to_change>
+          Switch from router.call() to router.call_with_fallback() so diagnosis failures
+          don't crash the entire run. If fallback is used, append "diagnose_failure" to degraded_nodes.
+        </what_to_change>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          Add confidence-aware routing after diagnosis. If the debugger's confidence is below 0.3,
+          route to a "blind retry" (regenerate from scratch) instead of targeted repair.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="9" title="Improve the Sandbox" estimated_time="3-4 hours" priority="medium">
+    <problem>
+      Solution code and test code run in the same namespace. Tests can couple to implementation
+      internals (helper functions, module-level variables, side effects).
+    </problem>
+    <files_to_modify>
+      <file path="sandbox/python_executor.py" action="modify">
+        <what_to_change>
+          1. Write solution code to a SEPARATE temp file.
+          2. Update the sandbox wrapper to use importlib.util to load the solution as an
+             isolated module, then inject only public names (not starting with _) into the
+             test namespace via globals().
+          3. Add resource limits using the resource module via preexec_fn on the subprocess:
+             - RLIMIT_AS: 256MB max memory
+             - RLIMIT_CPU: 10 seconds max CPU time
+             - RLIMIT_NPROC: 0 (no subprocesses)
+          4. Update the module docstring to document the security layering:
+             Layer 1: subprocess isolation, Layer 2: rlimit resource limits,
+             Layer 3: importlib namespace separation, Layer 4 (production): nsjail/Docker
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="12" title="Human-in-the-Loop with LangGraph interrupt()" estimated_time="4-5 hours" priority="critical">
+    <problem>
+      Using LangGraph but completely ignoring its flagship capability: interrupt().
+      For enterprise agent systems, human oversight is the entire point.
+    </problem>
+    <files_to_modify>
+      <file path="agent/config.py" action="create">
+        <what_to_change>
+          Create AgentConfig dataclass with autonomy_level field:
+          - "full_auto": no interrupts (current behavior, default)
+          - "review_repairs": pause before each repair for human approval
+          - "review_all": pause before generation AND repair
+          Also include max_iterations, and placeholder fields for features from later fixes
+          (parallel_strategies, enable_critic, enable_spec_tests, enable_cross_session_memory,
+          enable_checkpointing, persist_checkpoints, model_overrides).
+          Add classmethod presets: development(), staging(), production().
+        </what_to_change>
+        <reference_code><![CDATA[
+"""Declarative configuration for agent behavior."""
+from dataclasses import dataclass, field
+
+@dataclass
+class AgentConfig:
+    max_iterations: int = 4
+    autonomy_level: str = "full_auto"
+    parallel_strategies: bool = False
+    enable_critic: bool = True
+    critic_confidence_threshold: float = 0.6
+    enable_spec_tests: bool = True
+    enable_cross_session_memory: bool = False
+    memory_persist_dir: str = ".agent_memory"
+    enable_langsmith: bool = False
+    langsmith_project: str = "self-healing-agent"
+    enable_checkpointing: bool = True
+    persist_checkpoints: bool = False
+    model_overrides: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def development(cls) -> "AgentConfig":
+        return cls(autonomy_level="full_auto", parallel_strategies=False,
+                   enable_critic=False, enable_spec_tests=False,
+                   enable_cross_session_memory=False, enable_checkpointing=False)
+
+    @classmethod
+    def staging(cls) -> "AgentConfig":
+        return cls(autonomy_level="review_repairs", parallel_strategies=True,
+                   enable_critic=True, enable_spec_tests=True,
+                   enable_cross_session_memory=True, enable_checkpointing=True)
+
+    @classmethod
+    def production(cls) -> "AgentConfig":
+        return cls(autonomy_level="review_all", parallel_strategies=True,
+                   enable_critic=True, enable_spec_tests=True,
+                   enable_cross_session_memory=True, enable_checkpointing=True,
+                   persist_checkpoints=True)
+]]></reference_code>
+      </file>
+      <file path="agent/nodes/review_repair.py" action="create">
+        <what_to_change>
+          Create a human-in-the-loop review node using LangGraph's interrupt().
+          The node presents the diagnosis (root_cause, failure_category, repair_strategy,
+          confidence, code preview) to the human and waits for a decision:
+          - "approve": continue with existing strategy
+          - "edit": update repair_strategy and/or root_cause with human-provided values
+          - "abort": end the agent run via Command(goto="__end__")
+        </what_to_change>
+        <reference_code><![CDATA[
+from langgraph.types import interrupt, Command
+
+async def review_repair(state):
+    decision = interrupt({
+        "type": "repair_review",
+        "iteration": state.get("iteration", 0),
+        "root_cause": state.get("root_cause", ""),
+        "failure_category": state.get("failure_category", ""),
+        "repair_strategy": state.get("repair_strategy", ""),
+        "confidence": state.get("diagnosis_confidence", 0.5),
+        "current_code_preview": state.get("current_code", "")[:500],
+        "question": "Approve this repair strategy, edit it, or abort?"
+    })
+    action = decision.get("action", "approve")
+    if action == "approve":
+        return {}
+    elif action == "edit":
+        return {
+            "repair_strategy": decision.get("edited_strategy", state["repair_strategy"]),
+            "root_cause": decision.get("edited_root_cause", state["root_cause"]),
+        }
+    elif action == "abort":
+        return Command(goto="__end__")
+    return {}
+]]></reference_code>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          Update build_graph() to accept AgentConfig.
+          Conditionally add the review_repair node when autonomy_level is not "full_auto".
+          Wire it between update_learning_log and increment_iteration.
+        </what_to_change>
+      </file>
+      <file path="demo/demo_runner.py" action="modify">
+        <what_to_change>
+          IMPORTANT: The current run_demo_sync() uses asyncio.run() which creates a fresh event loop
+          and blocks until completion. This is INCOMPATIBLE with interrupt() since the graph pauses
+          mid-execution and needs a separate Command(resume=...) call to continue.
+
+          When autonomy_level != "full_auto":
+          1. Switch demo/app.py to use Gradio's native async support (async generator functions).
+          2. Remove the run_demo_sync wrapper for HITL mode.
+          3. When the graph yields an __interrupt__ state, yield the interrupt payload to the UI,
+             wait for user input via Gradio components, then resume with
+             graph.invoke(Command(resume=decision), config).
+
+          When autonomy_level == "full_auto", the existing sync wrapper can be kept.
+
+          Also update run_demo_async() to accept AgentConfig parameter and pass it to build_graph().
+          Update DemoUIState.apply_event() to handle the new REPAIR_REVIEW event type.
+        </what_to_change>
+      </file>
+      <file path="demo/app.py" action="modify">
+        <what_to_change>
+          Add interrupt handling UI components (initially hidden):
+          - A review panel with diagnosis display, Approve/Edit/Abort buttons
+          - When interrupt event is received, show the panel
+          - On user action, call graph.invoke(Command(resume=decision), config)
+          
+          Also update build_app() to accept AgentConfig parameter.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+    <dependencies_to_add>
+      <dependency>langgraph checkpoint: InMemorySaver (already included in langgraph)</dependency>
+    </dependencies_to_add>
+  </fix>
+
+  <fix id="13" title="Checkpointing and Time-Travel Debugging" estimated_time="3-4 hours" priority="high">
+    <problem>
+      If the agent fails at iteration 3 of 4, everything is lost. No way to rewind, inspect,
+      or fork from a previous checkpoint.
+    </problem>
+    <files_to_modify>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          1. Import InMemorySaver and SqliteSaver from langgraph.checkpoint.
+          2. In build_graph(), add checkpointing based on AgentConfig:
+             - If persist_checkpoints: use SqliteSaver with ".agent_checkpoints.db"
+             - Else if enable_checkpointing: use InMemorySaver
+             - Else: no checkpointer (compile without it)
+          3. Update run_agent() and stream_agent() to accept and pass thread_config
+             with a thread_id for checkpoint tracking.
+          4. Add run_agent_with_history() that returns both final state and checkpoint history.
+          5. Add fork_from_iteration() that rewinds to a specific iteration, modifies state,
+             and replays forward.
+        </what_to_change>
+        <reference_code><![CDATA[
+import uuid
+from langgraph.checkpoint.memory import InMemorySaver
+
+async def run_agent_with_history(task_description, config, router):
+    app = build_graph(config=config, router=router)
+    thread_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    initial_state = _make_initial_state(task_description, config.max_iterations)
+    final_state = await app.ainvoke(initial_state, thread_config)
+    history = list(app.get_state_history(thread_config))
+    return final_state, history
+
+async def fork_from_iteration(app, thread_config, target_iteration, modified_state):
+    history = list(app.get_state_history(thread_config))
+    target = next((s for s in history if s.values.get("iteration") == target_iteration), None)
+    if not target:
+        raise ValueError(f"No checkpoint found for iteration {target_iteration}")
+    fork_config = app.update_state(target.config, values=modified_state, as_node="diagnose_failure")
+    return await app.ainvoke(None, fork_config)
+]]></reference_code>
+      </file>
+    </files_to_modify>
+  </fix>
+
+</phase>
+
+<!-- ============================================================ -->
+<!-- PHASE 3: AGENTIC TRANSFORMATION                              -->
+<!-- ============================================================ -->
+<phase id="3" name="Agentic Transformation" estimated_hours="16-20">
+
+  <fix id="6" title="Add Real Tool Use — ReAct Debugger" estimated_time="6-8 hours" priority="critical">
+    <problem>
+      Every "agent" is just an LLM call with a different prompt. There is no tool use, no
+      autonomous decision-making, no ReAct-style reasoning. This is a pipeline, not an agent.
+    </problem>
+    <files_to_modify>
+      <file path="agent/tools.py" action="create">
+        <what_to_change>
+          Create three debugger tools using @tool decorator from langchain_core.tools:
+
+          1. run_snippet(code: str) -> str
+             Execute a short Python snippet to test a hypothesis about a bug.
+             Uses sandbox executor with 5s timeout. Returns stdout + stderr.
+
+          2. inspect_function(code: str, function_name: str) -> str
+             Parse AST to extract function signature, arguments, and docstring.
+             Returns structured info about the function.
+
+          3. diff_iterations(code_v1: str, code_v2: str) -> str
+             Show unified diff between two code versions using difflib.
+             Returns the diff output.
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/diagnose_failure.py" action="modify">
+        <what_to_change>
+          Restructure diagnose_failure to use a ReAct loop with tools.
+          Instead of a single LLM call, the debugger should:
+          1. Be given the tools (run_snippet, inspect_function, diff_iterations) bound via bind_tools()
+          2. Operate in a think → act → observe loop using LangGraph's ToolNode pattern
+          3. The LLM decides whether to use a tool or provide the final diagnosis
+          4. When it returns the final structured diagnosis (no tool calls), the loop ends
+
+          This can be implemented as either:
+          a) A sub-graph with "reason" and "tools" nodes plus conditional routing, OR
+          b) A simple loop within the node function that calls the LLM, checks for tool_calls,
+             executes them, feeds results back, and repeats until done.
+
+          Choose approach (b) if the LLM provider doesn't support native tool calling
+          (Ollama with llama3 may not). In that case, instruct the LLM to output a special
+          JSON structure indicating tool use vs final diagnosis.
+        </what_to_change>
+      </file>
+      <file path="prompts/debugger.yaml" action="modify">
+        <what_to_change>
+          Update the debugger system prompt to inform the LLM about available tools.
+          IMPORTANT: The current prompt says "You do NOT write code." Change this to:
+          "You do NOT write repair code. You diagnose and investigate. You may run short
+          snippets to verify hypotheses using available tools."
+
+          Add instructions for when to use each tool:
+          - run_snippet: to verify hypotheses about edge cases
+          - inspect_function: to check function signatures and docstrings
+          - diff_iterations: to compare code across repair attempts
+
+          If using non-native tool calling (Ollama with llama3 doesn't support function calling),
+          add a tool-use JSON format to the prompt:
+          {"action": "use_tool", "tool": "run_snippet", "args": {"code": "..."}}
+          vs
+          {"action": "final_diagnosis", "root_cause": "...", ...}
+        </what_to_change>
+      </file>
+    </files_to_modify>
+    <note>
+      langchain-core is already in requirements.txt (langchain-core>=0.3.0) — no new dependency needed
+      for the @tool decorator. Do NOT add it again.
+    </note>
+  </fix>
+
+  <fix id="8" title="Honest README Reframing" estimated_time="2 hours" priority="medium">
+    <problem>
+      The README calls this a "multi-agent system" with "4 Specialized LLM Agents."
+      After implementing all fixes, rewrite the narrative to honestly describe the architecture.
+    </problem>
+    <files_to_modify>
+      <file path="README.md" action="modify">
+        <what_to_change>
+          1. Update architecture description to distinguish:
+             - Orchestrated Pipeline (Generator, QA, Executor, Memory — deterministic flow)
+             - Agentic Investigation (Debugger with ReAct loop and tools — autonomous)
+             - Human Oversight (configurable autonomy levels via interrupt())
+          2. Update the agent table to include the Critic role
+          3. Update the engineering concepts table to include:
+             ReAct agent loop, Human-in-the-loop, Time-travel debugging,
+             Parallel repair strategies, Cross-session learning, Dual-oracle testing, Observability
+          4. Update benchmark results to show BOTH self-reported and reference-validated metrics
+          5. Update the tech stack table with new dependencies (ChromaDB, LangSmith, etc.)
+          6. Update environment variables table with new config options
+          7. Remove or soften the "4 Specialized LLM Agents" framing
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="14" title="Parallel Repair Strategies with Tournament Selection" estimated_time="4-6 hours" priority="medium">
+    <problem>
+      The agent tries one repair strategy per iteration serially. If wrong, an entire iteration is wasted.
+    </problem>
+    <files_to_modify>
+      <file path="agent/state.py" action="modify">
+        <what_to_change>
+          Add `parallel_repairs: Annotated[list, operator.add]` to AgentState.
+          This uses a reducer so parallel branches append their results.
+          Add `strategy_name: str` for tracking which strategy was used.
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/parallel_generate.py" action="create">
+        <what_to_change>
+          Create fan_out_repairs() that returns a list of Send() objects, each with a
+          different repair strategy (minimal_fix, restructure, add_guards).
+
+          Create parallel_generate() node that generates a repair candidate for one strategy,
+          executes it against both test suites, and returns the result in parallel_repairs.
+
+          Create select_best_repair() node that picks the best candidate using tournament
+          selection: both pass > spec pass > fewest total failures.
+        </what_to_change>
+        <reference_code><![CDATA[
+from langgraph.types import Send
+
+def fan_out_repairs(state):
+    strategies = [
+        {"name": "minimal_fix", "instruction": "Change ONLY the failing line(s). Do not restructure."},
+        {"name": "restructure", "instruction": "Rewrite the core algorithm keeping the same interface."},
+        {"name": "add_guards", "instruction": "Add input validation and edge-case guards without changing core logic."},
+    ]
+    return [
+        Send("parallel_generate", {
+            **state,
+            "repair_strategy": f"{state.get('repair_strategy', '')}\n\nApproach: {s['instruction']}",
+            "strategy_name": s["name"],
+        })
+        for s in strategies
+    ]
+
+def select_best_repair(state):
+    candidates = state.get("parallel_repairs", [])
+    def score(c):
+        both = c["spec_passed"] and c["adv_passed"]
+        return (both, c["spec_passed"], -(c["spec_failures"] + c["adv_failures"]))
+    candidates.sort(key=score, reverse=True)
+    best = candidates[0] if candidates else None
+    if best:
+        return {
+            "current_code": best["code"],
+            "last_execution_passed": best["spec_passed"] and best["adv_passed"],
+            "parallel_repairs": [],
+        }
+    return {"parallel_repairs": []}
+]]></reference_code>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          When config.parallel_strategies is True, replace the single generate_solution
+          repair path with: fan_out_repairs → parallel_generate → select_best_repair.
+          Use LangGraph's conditional edges with Send for fan-out.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="15" title="Agent Self-Reflection / Critic Node" estimated_time="3-4 hours" priority="high">
+    <problem>
+      When tests pass, the agent immediately declares success. No sanity check on whether
+      the solution actually matches the specification vs merely passing generated tests.
+    </problem>
+    <files_to_modify>
+      <file path="prompts/critic.yaml" action="create">
+        <what_to_change>
+          Create a critic prompt with role, system prompt, schema, and review template.
+          Schema: {"verdict": "approve"|"reject", "issues": [...], "confidence": 0.0-1.0}
+          The review template receives task_description, code, and test_summary.
+          It asks the critic to evaluate whether the code actually solves the task,
+          identifies untested edge cases, and checks for algorithmic errors that
+          happen to produce correct output for the tested cases.
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/critic_review.py" action="create">
+        <what_to_change>
+          Create a critic node that reviews solutions after tests pass.
+          Uses router.call_with_fallback() with role="critic", template_key="review".
+          If verdict is "reject" AND confidence > critic_confidence_threshold (from config):
+            - Set last_execution_passed to False
+            - Set last_failure_summary to critic feedback
+            - Set root_cause and repair_strategy from critic issues
+            - Set status to "running" (re-enter repair loop)
+          If verdict is "approve": return empty dict (don't change state).
+        </what_to_change>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          When config.enable_critic is True:
+          After execute_solution passes, route to critic_review instead of END.
+          After critic_review:
+          - If approved → END
+          - If rejected (confidence > threshold) → diagnose_failure (re-enter repair loop)
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="17" title="Multi-Model Routing" estimated_time="2-3 hours" priority="medium">
+    <problem>
+      Every agent role uses the same model. The memory summarizer doesn't need the same
+      model power as the code generator.
+    </problem>
+    <files_to_modify>
+      <file path="llm/router.py" action="modify">
+        <what_to_change>
+          1. Add role_providers: dict[str, BaseLLMProvider] parameter to LLMRouter.__init__().
+          2. Add _get_provider(role) method that checks role_providers first, falls back to default.
+          3. Update call() and call_with_fallback() to use _get_provider(role) instead of self._provider.
+          4. Log which model handled each call.
+        </what_to_change>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          When building the router, check config.model_overrides and create role-specific
+          providers for any overridden roles.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+</phase>
+
+<!-- ============================================================ -->
+<!-- PHASE 4: PLATFORM-LEVEL POLISH                               -->
+<!-- ============================================================ -->
+<phase id="4" name="Platform-Level Polish" estimated_hours="14-18">
+
+  <fix id="10" title="Cross-Session Learning with a Vector Store" estimated_time="4-6 hours" priority="medium">
+    <problem>
+      The learning log resets between tasks. No cross-session memory. The system makes
+      the same mistakes repeatedly.
+    </problem>
+    <files_to_modify>
+      <file path="agent/memory_store.py" action="create">
+        <what_to_change>
+          Create LessonStore class using ChromaDB:
+          - __init__(persist_dir): Create/connect to a ChromaDB collection named "lessons"
+          - store_lesson(lesson, task_category, failure_category, task_id): Upsert with metadata
+          - retrieve_relevant_lessons(query, task_category, n_results=5): Semantic search with optional category filter
+          - total_lessons property: Return collection count
+          Use hashlib for generating deterministic document IDs.
+          Wrap all operations in try/except for graceful failure.
+        </what_to_change>
+      </file>
+      <file path="agent/nodes/generate_solution.py" action="modify">
+        <what_to_change>
+          At iteration 0, if lesson_store is available, retrieve relevant lessons
+          and prepend them to the learning_log.
+        </what_to_change>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          When config.enable_cross_session_memory is True, create a LessonStore instance
+          and pass it to the generate_solution and post-success nodes.
+          After a successful run, persist the learning log lessons to the store.
+        </what_to_change>
+      </file>
+      <file path="tests/test_memory_store.py" action="create">
+        <what_to_change>
+          Test LessonStore roundtrip: store a lesson, retrieve it by semantic query,
+          verify it's returned.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+    <dependencies_to_add>
+      <dependency>chromadb</dependency>
+    </dependencies_to_add>
+  </fix>
+
+  <fix id="16" title="Benchmark Against HumanEval" estimated_time="4-6 hours" priority="high">
+    <problem>
+      8 custom tasks are fine for development, but interviewers will ask how this compares
+      to established benchmarks.
+    </problem>
+    <files_to_modify>
+      <file path="evaluation/humaneval_adapter.py" action="create">
+        <what_to_change>
+          Create adapter functions:
+          - load_humaneval_tasks(path): Load HumanEval problems from JSONL
+          - humaneval_to_agent_task(he_task): Convert HumanEval problem to agent task description
+          - extract_completion(agent_code, entry_point): Extract function body from agent output
+        </what_to_change>
+      </file>
+      <file path="evaluation/run_humaneval.py" action="create">
+        <what_to_change>
+          Create run_humaneval_benchmark() that:
+          1. Loads HumanEval tasks (164 problems)
+          2. Runs each through the agent with configurable max_iterations
+          3. Extracts completions and writes to JSONL in HumanEval format
+          4. Returns summary stats (total, completed, errors)
+          Add CLI entry point with argparse for --max-tasks, --max-iterations, --provider.
+        </what_to_change>
+      </file>
+    </files_to_modify>
+    <dependencies_to_add>
+      <dependency>human-eval (pip install human-eval or clone from github.com/openai/human-eval)</dependency>
+    </dependencies_to_add>
+    <post_implementation_note>
+      After generating samples, run the official evaluator:
+      evaluate_functional_correctness evaluation/humaneval_samples.jsonl
+      This produces Pass@1, the industry-standard metric.
+    </post_implementation_note>
+  </fix>
+
+  <fix id="18" title="Graph Visualization in the UI" estimated_time="2-3 hours" priority="low">
+    <problem>
+      The agent's graph topology is invisible to the user. They can't see the conditional
+      routing, repair loop, or current position in the flow.
+    </problem>
+    <files_to_modify>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          After compiling the graph, generate a Mermaid diagram string using
+          app.get_graph().draw_mermaid(). Optionally generate a PNG using
+          app.get_graph().draw_mermaid_png(). Store these as accessible attributes
+          or return them alongside the compiled graph.
+        </what_to_change>
+      </file>
+      <file path="demo/app.py" action="modify">
+        <what_to_change>
+          1. Add a graph visualization panel in the Gradio UI using gr.Image or gr.HTML.
+          2. Display the Mermaid diagram as a static image.
+          3. Add a "Current Node" text indicator that updates during streaming.
+          4. Optionally: add a highlight_node() function that re-renders the Mermaid diagram
+             with the active node styled differently (fill:#ff6, stroke-width:4px).
+        </what_to_change>
+      </file>
+    </files_to_modify>
+  </fix>
+
+  <fix id="19" title="Configurable Agent Topologies" estimated_time="4-6 hours" priority="medium">
+    <problem>
+      The graph topology is hardcoded. Different teams need different configurations.
+      A team building agents for other teams needs declarative configuration.
+    </problem>
+    <files_to_modify>
+      <file path="agent/config.py" action="modify">
+        <what_to_change>
+          This file was created in Fix 12. Now ensure all 19 fix features are represented
+          as config fields. The final AgentConfig should include:
+          - max_iterations, autonomy_level
+          - parallel_strategies
+          - enable_critic, critic_confidence_threshold
+          - enable_spec_tests
+          - enable_cross_session_memory, memory_persist_dir
+          - enable_langsmith, langsmith_project
+          - enable_checkpointing, persist_checkpoints
+          - model_overrides
+          With classmethod presets: development(), staging(), production().
+        </what_to_change>
+      </file>
+      <file path="agent/graph.py" action="modify">
+        <what_to_change>
+          This is the culmination — build_graph() should now dynamically construct the
+          graph topology based on ALL AgentConfig fields:
+          1. Always add: generate_solution, create_adversarial_tests, execute_solution,
+             diagnose_failure, update_learning_log, increment_iteration
+          2. Conditionally add generate_spec_tests (config.enable_spec_tests)
+          3. Conditionally add critic_review (config.enable_critic)
+          4. Conditionally add review_repair (config.autonomy_level != "full_auto")
+          5. Conditionally add parallel_generate + select_best_repair (config.parallel_strategies)
+          6. Wire edges dynamically based on which nodes are present
+          7. Add checkpointer based on config
+          Ensure the development() preset produces the same graph as the current hardcoded one
+          for backward compatibility.
+        </what_to_change>
+      </file>
+      <file path="demo/app.py" action="modify">
+        <what_to_change>
+          Add a preset selector (Radio: Development, Staging, Production, Custom).
+          Selecting a preset configures the agent automatically.
+          "Custom" reveals individual toggles for each config field.
+          Add the selected config to results output for reproducibility.
+          Update build_app() to accept and use AgentConfig.
+        </what_to_change>
+      </file>
+      <file path="app.py" action="modify">
+        <what_to_change>
+          The root app.py (HuggingFace Spaces entry point) currently creates LLMRouter()
+          without config and calls _prewarm(). After the config system is in place:
+          1. Read config preset from environment variable: AGENT_PRESET (default: "development")
+          2. Create AgentConfig from preset via getattr(AgentConfig, preset)()
+          3. Pass config through to build_app() in demo/app.py
+          4. If config.model_overrides is set, prewarm each role-specific provider
+        </what_to_change>
+        <reference_code><![CDATA[
+from agent.config import AgentConfig
+
+preset = os.environ.get("AGENT_PRESET", "development")
+config = getattr(AgentConfig, preset, AgentConfig.development)()
+demo = build_app(config=config)
+]]></reference_code>
+      </file>
+    </files_to_modify>
+  </fix>
+
+</phase>
+
+<!-- ============================================================ -->
+<!-- VERIFICATION CHECKLIST                                        -->
+<!-- ============================================================ -->
+<verification_checklist>
+  <check phase="1">All existing tests pass with LLM_PROVIDER=mock pytest -v</check>
+  <check phase="1">New tests in test_context_builder.py, test_router.py pass</check>
+  <check phase="1">test_graph_mock.py no longer accepts "running" as terminal status</check>
+  <check phase="1">.github/workflows/test.yml exists and is valid YAML</check>
+  <check phase="1">prompt_loader.py has get_raw_template() function that returns raw template string</check>
+  <check phase="2">Spec test generation works (generate_from_spec template produces valid tests)</check>
+  <check phase="2">execute_solution runs both spec and adversarial tests</check>
+  <check phase="2">Router.call_with_fallback returns safe defaults on schema failure</check>
+  <check phase="2">Sandbox uses importlib for namespace separation</check>
+  <check phase="2">interrupt() pauses execution when autonomy_level is not full_auto</check>
+  <check phase="2">Checkpointer saves state at each node; get_state_history returns history</check>
+  <check phase="3">Debugger tools (run_snippet, inspect_function, diff_iterations) work in isolation</check>
+  <check phase="3">Debugger ReAct loop calls tools when appropriate</check>
+  <check phase="3">Critic node rejects bad solutions and re-enters repair loop</check>
+  <check phase="3">Parallel repair fan-out produces 3 candidates and selects the best</check>
+  <check phase="3">Multi-model routing uses different providers per role</check>
+  <check phase="3">agent/events.py has new event type constants for all new nodes</check>
+  <check phase="3">framework/streaming.py PUBLIC_EVENT_TYPES includes all new event types</check>
+  <check phase="3">demo/demo_runner.py DemoUIState.apply_event handles new event types</check>
+  <check phase="4">LessonStore stores and retrieves lessons via ChromaDB</check>
+  <check phase="4">HumanEval adapter converts problems and runs agent</check>
+  <check phase="4">Graph visualization renders Mermaid diagram in Gradio</check>
+  <check phase="4">AgentConfig.development() produces same behavior as current hardcoded graph</check>
+  <check phase="4">AgentConfig.production() enables all features</check>
+  <check phase="4">Root app.py reads AGENT_PRESET env var and passes config to build_app()</check>
+  <check final="true">README accurately describes the implemented architecture</check>
+  <check final="true">All reference test codes in benchmark_tasks.py are populated</check>
+  <check final="true">results.json reports both self-reported and reference-validated metrics</check>
+</verification_checklist>
+
+</prompt>

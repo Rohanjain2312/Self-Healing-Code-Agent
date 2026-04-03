@@ -34,10 +34,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def validate_against_reference(task: BenchmarkTask, final_code: str) -> bool | None:
+    """
+    Run the agent's final code against held-out reference tests.
+
+    Returns True/False if reference_test_code is present, None otherwise.
+    This provides an independent (non-circular) measure of correctness that
+    is separate from the tests the QA agent generated itself.
+    """
+    if not task.reference_test_code:
+        return None
+    from sandbox.python_executor import execute
+    result = await execute(
+        solution_code=final_code,
+        test_code=task.reference_test_code,
+    )
+    return result.passed
+
+
 def _extract_task_result(
     task: BenchmarkTask,
     final_state: AgentState,
     elapsed: float,
+    reference_test_passed: bool | None = None,
 ) -> TaskResult:
     """Convert final agent state into a TaskResult for metrics."""
     success = final_state.get("status") == "success" or final_state.get("last_execution_passed", False)
@@ -60,6 +79,8 @@ def _extract_task_result(
         iterations_used=iterations_used + 1,  # 0-indexed → 1-indexed count
         failure_categories=failure_categories,
         final_code=final_state.get("current_code", ""),
+        reference_test_passed=reference_test_passed,
+        elapsed_seconds=round(elapsed, 2),
     )
 
 
@@ -79,7 +100,9 @@ async def run_single_task(
             router=router,
         )
         elapsed = time.monotonic() - start
-        result = _extract_task_result(task, final_state, elapsed)
+        final_code = final_state.get("current_code", "")
+        ref_passed = await validate_against_reference(task, final_code)
+        result = _extract_task_result(task, final_state, elapsed, reference_test_passed=ref_passed)
 
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -166,7 +189,12 @@ async def run_benchmark(
     print(f"First-pass success:   {summary.first_pass_success}")
     print(f"Healed success:       {summary.healed_success}")
     print(f"Total failures:       {summary.total_failures}")
-    print(f"Repair effectiveness: {summary.repair_effectiveness:.1%}")
+    print(f"Repair effectiveness: {summary.repair_effectiveness:.1%}  (self-reported)")
+    if summary.reference_total:
+        ref_pct = (summary.reference_validated_success or 0) / summary.reference_total
+        print(f"Reference validated:  {summary.reference_validated_success}/{summary.reference_total} ({ref_pct:.1%})")
+        if summary.repair_effectiveness_validated is not None:
+            print(f"Repair eff. (ref):    {summary.repair_effectiveness_validated:.1%}")
     print(f"Avg iterations:       {summary.avg_iterations:.2f}")
     print("\nCategory success rates:")
     for cat, rate in sorted(summary.category_success_rates.items()):

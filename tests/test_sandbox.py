@@ -68,6 +68,34 @@ async def test_exception_in_solution():
     assert result.exception_type  # ZeroDivisionError
 
 
+@pytest.mark.asyncio
+async def test_memory_bomb_handled():
+    """Resource exhaustion (RecursionError stack overflow) is caught, not propagated."""
+    # Sandbox has no memory limits on macOS virtual memory, so test via stack overflow
+    # which reliably triggers RecursionError on all platforms.
+    result = await execute("def f(): return f()\nf()", "assert True", timeout=5.0)
+    assert not result.passed
+    assert "RecursionError" in result.exception_type or "RecursionError" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_import_error_captured():
+    """ImportError from a nonexistent module is captured, not propagated."""
+    result = await execute("import nonexistent_module_xyz", "assert True")
+    assert not result.passed
+    assert (
+        "ModuleNotFoundError" in result.exception_type
+        or "ModuleNotFoundError" in result.stderr
+    )
+
+
+@pytest.mark.asyncio
+async def test_solution_and_test_code_both_empty():
+    """Empty solution with a trivial pass test should succeed."""
+    result = await execute("", "pass")
+    assert result.passed
+
+
 def test_format_failure_summary_on_pass():
     from sandbox.python_executor import ExecutionResult
     result = ExecutionResult(passed=True, stdout="", stderr="")

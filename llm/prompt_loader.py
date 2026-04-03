@@ -76,6 +76,25 @@ def render_template(role: str, template_key: str, variables: dict[str, Any]) -> 
     return template.format_map(_SafeMap(variables))
 
 
+def get_raw_template(role: str, template_key: str) -> str:
+    """
+    Return the raw (un-substituted) template string for a given role and key.
+
+    The router calls this before render_template() so it can pass the raw
+    template string to build_context(), enabling clean re-rendering after
+    variable truncation rather than brittle string-replacement on the output.
+    """
+    data = _load_yaml(role)
+    templates = data.get("templates", {})
+    if template_key not in templates:
+        available = list(templates.keys())
+        raise KeyError(
+            f"Template '{template_key}' not found for role '{role}'. "
+            f"Available: {available}"
+        )
+    return templates[template_key]
+
+
 def list_available_roles() -> list[str]:
     """Return all roles with prompt YAML files in the prompts directory."""
     return [p.stem for p in _PROMPTS_DIR.glob("*.yaml")]

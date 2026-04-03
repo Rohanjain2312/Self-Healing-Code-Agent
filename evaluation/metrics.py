@@ -31,6 +31,10 @@ class TaskResult:
     failure_categories: list[str] = field(default_factory=list)
     final_code: str = ""
     error: str = ""  # non-empty if agent crashed (not task failure)
+    # Whether the agent's final code passes the held-out reference tests.
+    # None means no reference_test_code was provided for this task.
+    reference_test_passed: bool | None = None
+    elapsed_seconds: float = 0.0  # wall-clock time for this task run
 
 
 @dataclass
@@ -40,12 +44,17 @@ class BenchmarkSummary:
     first_pass_success: int
     healed_success: int
     total_failures: int
-    repair_effectiveness: float  # healed / (total - first_pass)
+    repair_effectiveness: float  # healed / (total - first_pass) — self-reported
     avg_iterations: float
     category_success_rates: dict[str, float]
     provider: str
     model: str
     run_timestamp: str
+    # Reference-validated metrics: subset of tasks that have reference_test_code.
+    # These are independent of the agent's own generated tests.
+    reference_validated_success: int | None = None  # tasks passing held-out tests
+    reference_total: int | None = None  # tasks with reference_test_code
+    repair_effectiveness_validated: float | None = None  # reference-based effectiveness
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -81,6 +90,20 @@ def compute_summary(
         for cat, successes in category_results.items()
     }
 
+    # Reference-validated metrics (only for tasks with reference_test_code)
+    ref_results = [r for r in results if r.reference_test_passed is not None]
+    ref_total = len(ref_results)
+    ref_success = sum(1 for r in ref_results if r.reference_test_passed)
+    ref_first_pass = sum(
+        1 for r in ref_results if r.reference_test_passed and r.first_pass
+    )
+    ref_initially_failing = ref_total - ref_first_pass
+    ref_effectiveness = (
+        round((ref_success - ref_first_pass) / ref_initially_failing, 3)
+        if ref_initially_failing > 0
+        else (1.0 if ref_total > 0 else None)
+    )
+
     return BenchmarkSummary(
         total_tasks=total,
         first_pass_success=first_pass,
@@ -92,6 +115,9 @@ def compute_summary(
         provider=provider,
         model=model,
         run_timestamp=datetime.datetime.utcnow().isoformat() + "Z",
+        reference_validated_success=ref_success if ref_total > 0 else None,
+        reference_total=ref_total if ref_total > 0 else None,
+        repair_effectiveness_validated=ref_effectiveness,
     )
 
 

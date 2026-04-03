@@ -67,6 +67,27 @@ def test_nested_json_extraction():
     assert result["code"] == "x=1"
 
 
+def test_truncated_json_salvages_code():
+    """Simulates max_new_tokens cutting off the JSON mid-way."""
+    raw = '{"code": "def add(a,b):\\n    return a+b\\n", "explanation": "adds tw'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert "def add" in result["code"]
+
+
+def test_multiple_json_objects_extracts_first():
+    """When model outputs explanation then JSON then more text."""
+    raw = 'Let me think... {"code": "x = 1"} That should work. {"code": "x = 2"}'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert result["code"] == "x = 1"
+
+
+def test_code_with_escaped_quotes():
+    """Code containing escaped quotes inside JSON string."""
+    raw = '{"code": "def f():\\n    return \\"hello\\"\\n", "explanation": "returns string"}'
+    result = parse_and_validate(raw, _SIMPLE_SCHEMA)
+    assert '\\"hello\\"' in result["code"] or '"hello"' in result["code"]
+
+
 def test_literal_newlines_in_string_value_parse():
     # Model embeds real (literal) newlines inside a JSON string value instead
     # of \n escape sequences — strict JSON rejects this; strict=False accepts it.
