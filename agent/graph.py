@@ -486,7 +486,8 @@ async def stream_agent(
             new_events = events[total_seen:]
             total_seen = len(events)
             for event in new_events:
-                yield event
+                if isinstance(event, dict):
+                    yield event
 
     # Persist lessons for future cross-session retrieval
     if lesson_store is not None and final_learning_log:
