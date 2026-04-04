@@ -33,11 +33,142 @@ _MAX_DEMO_ITERATIONS = 4
 
 # Example tasks shown in the demo UI
 EXAMPLE_TASKS = [
-    "Write a Python function `merge_intervals(intervals: list[list[int]]) -> list[list[int]]` that merges overlapping intervals. Handle empty input, single intervals, and touching intervals (e.g. [1,3] and [3,5] should merge to [1,5]).",
-    "Write a Python function `flatten(nested) -> list` that recursively flattens nested lists and tuples. Strings are scalars (do not iterate their characters). None values are preserved.",
-    "Write a Python function `deduplicate_logs(logs: list[str]) -> list[str]` that removes duplicate log lines, preserving first-occurrence order. Strip trailing whitespace before comparing.",
-    "Write a Python function `compress_ranges(numbers: list[int]) -> list[str]` that compresses a list of integers into range strings. E.g. [1,2,3,5,7,8,9] → ['1-3', '5', '7-9']. Handle duplicates and single elements.",
-    "Write a Python function `safe_divide(numerator: float, denominator: float) -> float | None` that returns None for division by zero, infinity, or NaN arguments. No exceptions should propagate.",
+    # Problem 1: LRU Cache with frequency-based tie-breaking
+    # Hard because: model knows LRU but not this specific tie-breaking rule.
+    # Fails on: eviction when multiple keys have same frequency — wrong key evicted.
+    """Implement a class `LFUCache` with `get(key)` and `put(key, value)` methods.
+It must have O(1) average time complexity for both operations.
+
+Eviction rules (strictly in this order):
+1. Evict the key with the LOWEST access frequency (get + put count both increment frequency).
+2. If multiple keys share the lowest frequency, evict the one that was LEAST RECENTLY USED among them.
+3. put() on an existing key updates its value AND increments its frequency.
+4. put() on a new key when at capacity must evict before inserting. The new key starts with frequency 1.
+
+Example:
+cache = LFUCache(2)
+cache.put(1, 1)   # cache: {1: freq=1}
+cache.put(2, 2)   # cache: {1: freq=1, 2: freq=1}
+cache.get(1)      # returns 1, cache: {1: freq=2, 2: freq=1}
+cache.put(3, 3)   # evicts key 2 (lowest freq=1), cache: {1: freq=2, 3: freq=1}
+cache.get(2)      # returns -1 (not found)
+cache.get(3)      # returns 3
+cache.put(4, 4)   # evicts key 3 (lowest freq=1, LRU among freq=1 keys), cache: {1: freq=2, 4: freq=1}
+cache.get(3)      # returns -1
+cache.get(4)      # returns 4
+cache.get(1)      # returns 1
+
+Additional constraints:
+- get() on a missing key returns -1 and does NOT affect any frequencies.
+- A cache with capacity 0 always returns -1 on get() and silently ignores put().
+- All keys and values are non-negative integers.""",
+
+    # Problem 2: Expression evaluator with operator precedence and left-associativity
+    # Hard because: model typically uses a stack but gets precedence or left-associativity wrong.
+    # Fails on: chained same-precedence operators (8/2/2 should be 2 not 8), unary minus edge cases.
+    """Write a function `evaluate(expression: str) -> float` that evaluates a mathematical
+expression string containing:
+- Non-negative integers and decimals (e.g. 3, 3.14)
+- Operators: +, -, *, / (true division, not floor)
+- Unary minus (e.g. -3 * 2, -(4+5))
+- Parentheses for grouping (arbitrarily nested)
+- Spaces anywhere between tokens (ignore all whitespace)
+
+Operator precedence (high to low): *, / then +, -
+All operators are LEFT-ASSOCIATIVE:
+  8 / 2 / 2  →  (8 / 2) / 2  →  2.0   (NOT 8 / (2/2) = 8.0)
+  10 - 3 - 2  →  (10 - 3) - 2  →  5.0
+
+Edge cases your implementation must handle:
+- Unary minus before parentheses: -(3 + 4) → -7.0
+- Unary minus before a number: -3 + 5 → 2.0
+- Chained unary: --3 → 3.0
+- Expression starting with unary minus: -3 * -2 → 6.0
+- Division always returns float: 7 / 2 → 3.5
+- Single number: "42" → 42.0, "-42" → -42.0
+
+Do NOT use Python's eval() or ast.literal_eval().
+Do NOT import any external libraries.
+
+Examples:
+evaluate("3 + 4 * 2")       → 11.0
+evaluate("(3 + 4) * 2")     → 14.0
+evaluate("8 / 2 / 2")       → 2.0
+evaluate("-3 * -2")         → 6.0
+evaluate("-(3 + 4)")        → -7.0
+evaluate("10 - 3 - 2")      → 5.0
+evaluate("3.5 * 2")         → 7.0""",
+
+    # Problem 3: Alien dictionary topological sort with specific error handling
+    # Hard because: model gets basic topo sort right but fails on cycle detection,
+    # missing characters, or single-word edge cases.
+    # Fails on: words where a prefix word appears AFTER the longer word (invalid ordering).
+    """Write a function `alien_order(words: list[str]) -> str` that determines the
+character ordering of an alien alphabet given a sorted list of words in that alien language.
+
+Rules:
+- Return a string of all unique characters in the alien alphabet in a valid topological order.
+- If multiple valid orderings exist, return the LEXICOGRAPHICALLY SMALLEST valid ordering.
+- If the ordering is CONTRADICTORY (contains a cycle), return "" (empty string).
+- If a longer word appears before its prefix (e.g. ["abc", "ab"]), this is INVALID — return "".
+- Characters that appear in the word list but have NO ordering constraints relative to others
+  must still be included in the output.
+- If the input has only one word, return its unique characters in lexicographically sorted order.
+
+Examples:
+alien_order(["wrt", "wrf", "er", "ett", "rftt"])  → "wertf"
+alien_order(["z", "x"])                            → "zx"
+alien_order(["z", "x", "z"])                       → ""  (cycle: z→x→z)
+alien_order(["abc", "ab"])                          → ""  (prefix after longer word)
+alien_order(["abc"])                                → "abc"
+alien_order(["z", "z"])                             → "z"  (duplicate, no info)
+alien_order(["ac", "ab", "zc", "zb"])              → "azbc" or valid topo with lex smallest first
+
+Implementation requirements:
+- Use a min-heap or equivalent to always pick the lexicographically smallest available character.
+- Do not use any topological sort library — implement from scratch using adjacency list + in-degree tracking.""",
+
+    # Problem 4: Run-length encoding with a very specific output format
+    # Hard because: model knows RLE but gets the format wrong for runs of length 1,
+    # or fails on unicode/mixed characters, or gets the decode round-trip wrong.
+    # Fails on: single characters (should not emit "1x"), consecutive same chars across boundaries.
+    """Write two functions:
+
+1. `rle_encode(s: str) -> str`
+   Run-length encode a string using this EXACT format:
+   - A run of N identical characters is encoded as: the character followed by N (e.g. "a3")
+   - EXCEPTION: a run of exactly 1 character is encoded as just the character with NO number (e.g. "a" not "a1")
+   - The encoded string must be strictly shorter than or equal to the original for it to be worth encoding.
+     If encoding would make it longer, return the original string unchanged prefixed with "RAW:" (e.g. "RAW:abc")
+   - Empty string encodes to empty string.
+
+2. `rle_decode(s: str) -> str`
+   Decode a string produced by rle_encode():
+   - If the string starts with "RAW:", strip the prefix and return the rest unchanged.
+   - Otherwise parse character-then-optional-digits pairs and expand them.
+   - Must be a perfect inverse of rle_encode() for all inputs.
+
+Examples:
+rle_encode("aabbbcccc")    → "a2b3c4"
+rle_encode("abcd")         → "RAW:abcd"   (encoding "a1b1c1d1" would be longer... wait no:
+                                            "abcd" encodes to "abcd" since each run=1, no digits,
+                                            so encoded = "abcd" same length → return "RAW:abcd"
+                                            because NOT strictly shorter)
+rle_encode("aaabcd")       → "RAW:aaabcd" (encodes to "a3bcd" which IS shorter → return "a3bcd")
+rle_encode("")             → ""
+rle_encode("aaaa")         → "a4"
+rle_encode("aabb")         → "RAW:aabb"   (encodes to "a2b2" same length → not shorter → RAW)
+
+rle_decode("a2b3c4")       → "aabbbcccc"
+rle_decode("RAW:abcd")     → "abcd"
+rle_decode("a3bcd")        → "aaabcd"
+rle_decode("a4")           → "aaaa"
+rle_decode("")             → ""
+
+Additional constraints:
+- Input strings may contain any printable ASCII character including digits, spaces, punctuation.
+- rle_decode(rle_encode(s)) == s must hold for ALL strings s.
+- rle_encode(rle_decode(t)) == t must hold for all valid encoded strings t.""",
 ]
 
 
