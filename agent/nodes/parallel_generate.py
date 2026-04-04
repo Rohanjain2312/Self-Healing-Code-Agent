@@ -30,7 +30,7 @@ from langgraph.types import Send
 
 from agent.state import AgentState
 from agent.events import step_event, code_generated_event, parallel_repair_event
-from sandbox.python_executor import execute, format_failure_summary
+from sandbox.python_executor import execute
 from llm.router import LLMRouter
 
 logger = logging.getLogger(__name__)

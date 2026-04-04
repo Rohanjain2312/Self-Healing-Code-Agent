@@ -31,12 +31,12 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-import gradio as gr
+import gradio as gr  # noqa: E402
 
-from agent.config import AgentConfig
-from agent.graph import get_graph_mermaid
-from demo.demo_runner import EXAMPLE_TASKS, run_demo_sync
-from evaluation.metrics import load_results
+from agent.config import AgentConfig  # noqa: E402
+from agent.graph import get_graph_mermaid  # noqa: E402
+from demo.demo_runner import EXAMPLE_TASKS, run_demo_sync  # noqa: E402
+from evaluation.metrics import load_results  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -162,7 +162,7 @@ def _mermaid_html(diagram: str) -> str:
     safe_diagram = diagram.replace("\\", "\\\\").replace("`", "\\`")
     return f"""
 <div id="mermaid-container" style="background:#1e1e2e;border-radius:8px;padding:16px;overflow:auto;max-height:420px;">
-  <div class="mermaid" style="text-align:center;">{diagram}</div>
+  <div class="mermaid" style="text-align:center;">{safe_diagram}</div>
 </div>
 <script type="module">
   import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
@@ -225,10 +225,10 @@ diagnoses failures, and repairs solutions through structured iteration.
                         "production = all features + human review before each repair."
                     ),
                 )
-                with gr.Row(visible=False) as custom_row:
-                    enable_critic_cb = gr.Checkbox(label="Enable Critic", value=False)
-                    enable_spec_cb = gr.Checkbox(label="Enable Spec Tests", value=False)
-                    parallel_cb = gr.Checkbox(label="Parallel Repair Strategies", value=False)
+                with gr.Row(visible=False):
+                    gr.Checkbox(label="Enable Critic", value=False)
+                    gr.Checkbox(label="Enable Spec Tests", value=False)
+                    gr.Checkbox(label="Parallel Repair Strategies", value=False)
 
             with gr.Row():
                 with gr.Column(scale=2):

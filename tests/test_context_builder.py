@@ -1,5 +1,4 @@
 """Tests for context builder — verifies truncation actually applies."""
-import pytest
 from llm.context_builder import build_context
 
 

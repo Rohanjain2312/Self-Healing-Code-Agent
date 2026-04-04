@@ -1,0 +1,950 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<prompt>
+
+<meta>
+  <title>Self-Healing Code Agent — Post-Implementation Verification Suite</title>
+  <description>
+    Run every verification step sequentially. For each step, execute the command or script,
+    capture the output, and report PASS or FAIL with details. If a step fails, log the
+    error clearly but continue to the next step — do NOT stop on first failure.
+    At the end, produce a summary table of all steps with their status.
+  </description>
+  <repo_root>The current project directory (Self-Healing-Code-Agent)</repo_root>
+</meta>
+
+<global_rules>
+  <rule>Run every step in order. Do not skip any step.</rule>
+  <rule>If a step fails, log the full error output, mark it FAIL, and continue to the next step.</rule>
+  <rule>Do not attempt to fix anything during verification — only observe and report.</rule>
+  <rule>At the end, produce a SUMMARY TABLE with columns: Step Number, Step Name, Status (PASS/FAIL), Notes.</rule>
+  <rule>Use LLM_PROVIDER=mock for all test commands unless the step explicitly says otherwise.</rule>
+  <rule>For steps that require running Python scripts, use the project root as the working directory.</rule>
+  <rule>Capture and display both stdout and stderr for every command.</rule>
+</global_rules>
+
+<!-- ============================================================ -->
+<!-- STEP 1: ENVIRONMENT SETUP                                    -->
+<!-- ============================================================ -->
+<step id="1" name="Verify Python Version">
+  <command>python3 --version</command>
+  <expected>Python 3.11 or higher</expected>
+</step>
+
+<step id="2" name="Install Dependencies">
+  <command>pip install -r requirements.txt 2>&amp;1 | tail -20</command>
+  <expected>All packages install without errors. Note any version conflicts or failures.</expected>
+  <note>If chromadb fails to install, note it but continue — tests are designed to skip when chromadb is absent.</note>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 2: FULL TEST SUITE                                      -->
+<!-- ============================================================ -->
+<step id="3" name="Run Full Test Suite">
+  <command>LLM_PROVIDER=mock pytest -v --tb=short 2>&amp;1</command>
+  <expected>
+    All tests pass. The report from Claude Code said 44 passed, 3 skipped.
+    Verify the exact count. Skipped tests should only be chromadb-related.
+    No test should have status "ERROR" (as opposed to "FAIL" or "SKIP").
+  </expected>
+  <checks>
+    <check>Total passed count matches or exceeds 44</check>
+    <check>Skipped tests are only in test_memory_store.py</check>
+    <check>Zero failures</check>
+    <check>Zero errors</check>
+    <check>"running" does NOT appear as an accepted terminal status in test_graph_mock.py output</check>
+  </checks>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 3: YAML PROMPT FILES                                    -->
+<!-- ============================================================ -->
+<step id="4" name="Verify All YAML Prompt Files Load Correctly">
+  <command><![CDATA[
+python3 -c "
+from llm.prompt_loader import list_available_roles, get_system_prompt, get_schema, get_raw_template
+
+roles = list_available_roles()
+print(f'Available roles: {sorted(roles)}')
+assert 'generator' in roles, 'Missing generator role'
+assert 'qa_adversarial' in roles, 'Missing qa_adversarial role'
+assert 'debugger' in roles, 'Missing debugger role'
+assert 'memory_summarizer' in roles, 'Missing memory_summarizer role'
+assert 'critic' in roles, 'Missing critic role (Fix 15)'
+
+for r in roles:
+    prompt = get_system_prompt(r)
+    schema = get_schema(r)
+    assert len(prompt) > 10, f'{r}: system prompt too short ({len(prompt)} chars)'
+    print(f'  {r}: prompt={len(prompt)} chars, schema_keys={list(schema.get(\"properties\", {}).keys())}')
+
+# Verify new templates exist
+templates_to_check = [
+    ('generator', 'initial'),
+    ('generator', 'repair'),
+    ('qa_adversarial', 'generate'),
+    ('qa_adversarial', 'generate_from_spec'),
+    ('debugger', 'diagnose'),
+    ('debugger', 'react_diagnose'),
+    ('memory_summarizer', 'summarize'),
+    ('critic', 'review'),
+]
+for role, template_key in templates_to_check:
+    raw = get_raw_template(role, template_key)
+    assert len(raw) > 20, f'{role}/{template_key}: template too short'
+    print(f'  {role}/{template_key}: {len(raw)} chars OK')
+
+print('ALL YAML CHECKS PASSED')
+"
+]]></command>
+  <expected>All 5 roles found. All templates load. No KeyError or FileNotFoundError.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 4: GRAPH BUILDS WITH EACH PRESET                        -->
+<!-- ============================================================ -->
+<step id="5" name="Verify Graph Builds with Each Config Preset">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+from agent.config import AgentConfig
+from agent.graph import build_graph
+from llm.router import LLMRouter
+from llm.providers.mock_provider import MockProvider
+
+router = LLMRouter(provider=MockProvider())
+
+for preset_name in ['development', 'staging', 'production']:
+    config = getattr(AgentConfig, preset_name)()
+    print(f'--- {preset_name} ---')
+    print(f'  autonomy_level={config.autonomy_level}')
+    print(f'  enable_critic={config.enable_critic}')
+    print(f'  enable_spec_tests={config.enable_spec_tests}')
+    print(f'  parallel_strategies={config.parallel_strategies}')
+    print(f'  enable_checkpointing={config.enable_checkpointing}')
+
+    try:
+        app = build_graph(config=config, router=router)
+        # Try to get the mermaid diagram as a topology check
+        mermaid = app.get_graph().draw_mermaid()
+        edge_count = mermaid.count('-->')
+        print(f'  Graph built OK: {edge_count} edges')
+    except Exception as e:
+        print(f'  GRAPH BUILD FAILED: {e}')
+        import traceback
+        traceback.print_exc()
+
+print('GRAPH BUILD CHECKS COMPLETE')
+"
+]]></command>
+  <expected>
+    All three presets build without errors.
+    Development should have the fewest edges.
+    Production should have the most edges.
+  </expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 5: SINGLE TASK END-TO-END (MOCK)                        -->
+<!-- ============================================================ -->
+<step id="6" name="Run Single Task End-to-End with Mock Provider">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+import asyncio
+from agent.graph import run_agent
+from agent.config import AgentConfig
+from llm.router import LLMRouter
+from llm.providers.mock_provider import MockProvider
+
+async def test():
+    config = AgentConfig.development()
+    router = LLMRouter(provider=MockProvider())
+    state = await run_agent(
+        'Write a function add(a, b) that returns a + b.',
+        max_iterations=2,
+        router=router,
+        config=config,
+    )
+    print(f'Status: {state[\"status\"]}')
+    print(f'Iterations: {state[\"iteration\"]}')
+    print(f'Code length: {len(state.get(\"current_code\", \"\"))} chars')
+    print(f'Events count: {len(state.get(\"events\", []))}')
+    print(f'Degraded nodes: {state.get(\"degraded_nodes\", [])}')
+    print(f'Spec test code length: {len(state.get(\"spec_test_code\", \"\"))} chars')
+
+    assert state['status'] in ('success', 'max_iterations_reached'), f'Bad status: {state[\"status\"]}'
+    assert len(state.get('current_code', '')) > 0, 'No code generated'
+    assert len(state.get('events', [])) > 0, 'No events emitted'
+    print('SINGLE TASK TEST PASSED')
+
+asyncio.run(test())
+"
+]]></command>
+  <expected>Status is "success" or "max_iterations_reached". Code is non-empty. Events are emitted.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 6: STREAMING AGENT (MOCK)                               -->
+<!-- ============================================================ -->
+<step id="7" name="Verify Stream Agent Yields Events">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+import asyncio
+from agent.graph import stream_agent
+from agent.config import AgentConfig
+from llm.router import LLMRouter
+from llm.providers.mock_provider import MockProvider
+
+async def test():
+    config = AgentConfig.development()
+    router = LLMRouter(provider=MockProvider())
+    events = []
+    async for event in stream_agent(
+        'Write a trivial function.',
+        max_iterations=1,
+        router=router,
+        config=config,
+    ):
+        events.append(event)
+
+    print(f'Total events streamed: {len(events)}')
+    event_types = set(e.get('type', '') for e in events)
+    print(f'Event types seen: {sorted(event_types)}')
+
+    assert len(events) > 0, 'No events streamed'
+    for e in events:
+        assert 'type' in e, f'Event missing type field: {e}'
+        assert 'message' in e, f'Event missing message field: {e}'
+    print('STREAM AGENT TEST PASSED')
+
+asyncio.run(test())
+"
+]]></command>
+  <expected>Multiple events streamed. Each event has "type" and "message" fields.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 7: CONTEXT BUILDER TRUNCATION                           -->
+<!-- ============================================================ -->
+<step id="8" name="Verify Context Builder Truncation Actually Works">
+  <command><![CDATA[
+python3 -c "
+from llm.context_builder import build_context
+
+# Test 1: Large input gets truncated
+huge_var = 'x' * 50000
+template = 'Code: {code}'
+rendered = template.format(code=huge_var)
+result = build_context(rendered, {'code': huge_var}, template_str=template, max_context_tokens=100)
+assert len(result) < len(rendered), f'Truncation did not reduce size: {len(result)} >= {len(rendered)}'
+assert 'TRUNCATED' in result, 'Missing TRUNCATED marker'
+print(f'Test 1 PASSED: {len(rendered)} chars -> {len(result)} chars')
+
+# Test 2: Small input passes through unchanged
+small_var = 'def f(): pass'
+rendered_small = template.format(code=small_var)
+result_small = build_context(rendered_small, {'code': small_var}, template_str=template, max_context_tokens=5000)
+assert result_small == rendered_small, 'Small input was incorrectly modified'
+print(f'Test 2 PASSED: small input unchanged')
+
+# Test 3: Fallback without template_str
+result_fallback = build_context(rendered, {'code': huge_var}, max_context_tokens=100)
+assert len(result_fallback) < len(rendered), 'Fallback truncation failed'
+print(f'Test 3 PASSED: fallback truncation works')
+
+print('CONTEXT BUILDER TESTS ALL PASSED')
+"
+]]></command>
+  <expected>All three tests pass. This confirms Fix 1 (the original bug) is actually fixed.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 8: ROUTER RETRY AND FALLBACK                            -->
+<!-- ============================================================ -->
+<step id="9" name="Verify Router call_with_fallback Behavior">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+import asyncio
+from llm.router import LLMRouter
+from llm.base import BaseLLMProvider, InferenceRequest, InferenceResponse
+
+class AlwaysBadProvider(BaseLLMProvider):
+    @property
+    def provider_name(self): return 'test'
+    @property
+    def model_name(self): return 'test'
+    async def infer(self, request):
+        return InferenceResponse(text='not valid json at all', provider='test', model='test')
+
+async def test():
+    router = LLMRouter(provider=AlwaysBadProvider())
+
+    # call_with_fallback should NOT raise — should return fallback
+    result, used_fallback = await router.call_with_fallback(
+        role='debugger',
+        template_key='diagnose',
+        variables={
+            'task_description': 'test',
+            'code': 'def f(): pass',
+            'test_results': 'assert False',
+            'iteration_history': 'none',
+        },
+    )
+    assert used_fallback, 'Expected fallback to be used'
+    assert 'root_cause' in result, f'Fallback missing root_cause: {result}'
+    assert result.get('confidence', 1.0) <= 0.2, f'Fallback confidence too high: {result}'
+    print(f'Fallback result: {result}')
+    print('ROUTER FALLBACK TEST PASSED')
+
+asyncio.run(test())
+"
+]]></command>
+  <expected>Fallback is used. Result contains role-specific safe defaults with low confidence.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 9: DEBUGGER TOOLS                                       -->
+<!-- ============================================================ -->
+<step id="10" name="Verify Debugger Tools Work in Isolation">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+import asyncio
+from agent.tools import run_snippet, inspect_function, diff_iterations, call_tool
+
+async def test():
+    # Test run_snippet
+    result = await run_snippet('print(1 + 1)')
+    assert '2' in result, f'run_snippet failed: {result}'
+    print(f'run_snippet: {result.strip()[:100]}')
+
+    # Test inspect_function
+    code = '''
+def merge_intervals(intervals: list[list[int]]) -> list[list[int]]:
+    \"\"\"Merge overlapping intervals.\"\"\"
+    if not intervals:
+        return []
+    return sorted(intervals)
+'''
+    result = inspect_function(code, 'merge_intervals')
+    assert 'merge_intervals' in result, f'inspect_function failed: {result}'
+    assert 'intervals' in result, f'inspect_function missing args: {result}'
+    print(f'inspect_function: {result.strip()[:200]}')
+
+    # Test diff_iterations
+    v1 = 'def f(x):\n    return x\n'
+    v2 = 'def f(x):\n    return x + 1\n'
+    result = diff_iterations(v1, v2)
+    assert 'return x + 1' in result or '+' in result, f'diff failed: {result}'
+    print(f'diff_iterations: {result.strip()[:200]}')
+
+    # Test call_tool dispatch
+    result = await call_tool('run_snippet', {'code': 'print(42)'})
+    assert '42' in result, f'call_tool dispatch failed: {result}'
+    print(f'call_tool dispatch: OK')
+
+    # Test unknown tool
+    result = await call_tool('nonexistent_tool', {})
+    assert 'Unknown' in result, f'Unknown tool should return error: {result}'
+    print(f'Unknown tool handling: OK')
+
+    print('ALL TOOL TESTS PASSED')
+
+asyncio.run(test())
+"
+]]></command>
+  <expected>All three tools produce correct output. call_tool dispatches correctly. Unknown tools return error message.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 10: SCHEMA VALIDATOR EDGE CASES                         -->
+<!-- ============================================================ -->
+<step id="11" name="Verify Schema Validator Edge Cases">
+  <command><![CDATA[
+python3 -c "
+from llm.schema_validator import parse_and_validate, StructuredOutputError
+
+SCHEMA = {
+    'type': 'object',
+    'required': ['code'],
+    'properties': {
+        'code': {'type': 'string'},
+        'explanation': {'type': 'string'},
+    },
+}
+
+# Truncated JSON salvage
+raw = '{\"code\": \"def add(a,b):\\\\n    return a+b\\\\n\", \"explanation\": \"adds tw'
+try:
+    result = parse_and_validate(raw, SCHEMA)
+    assert 'def add' in result['code'], f'Salvage failed: {result}'
+    print('Truncated JSON salvage: PASS')
+except Exception as e:
+    print(f'Truncated JSON salvage: FAIL ({e})')
+
+# Markdown fenced
+raw2 = 'Here is my solution:\n\`\`\`json\n{\"code\": \"def f(): pass\"}\n\`\`\`\nDone!'
+result2 = parse_and_validate(raw2, SCHEMA)
+assert result2['code'] == 'def f(): pass'
+print('Markdown fence extraction: PASS')
+
+# Nested dict coercion
+raw3 = '{\"code\": {\"functions\": [{\"name\": \"add\"}]}, \"explanation\": \"oops\"}'
+result3 = parse_and_validate(raw3, SCHEMA)
+assert isinstance(result3['code'], str)
+print('Nested dict coercion: PASS')
+
+# Invalid JSON raises
+try:
+    parse_and_validate('this is not json', SCHEMA)
+    print('Invalid JSON rejection: FAIL (should have raised)')
+except StructuredOutputError:
+    print('Invalid JSON rejection: PASS')
+
+print('ALL SCHEMA VALIDATOR CHECKS PASSED')
+"
+]]></command>
+  <expected>All four edge cases handled correctly.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 11: SANDBOX NAMESPACE ISOLATION                         -->
+<!-- ============================================================ -->
+<step id="12" name="Verify Sandbox Namespace Isolation and Resource Limits">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+import asyncio
+from sandbox.python_executor import execute
+
+async def test():
+    # Basic pass
+    r = await execute('def add(a,b): return a+b', 'assert add(1,2) == 3')
+    assert r.passed, f'Basic test failed: {r.stderr}'
+    print('Basic execution: PASS')
+
+    # Timeout enforcement
+    r = await execute('x = 1', 'while True: pass', timeout=2.0)
+    assert not r.passed, 'Infinite loop should fail'
+    print(f'Timeout enforcement: PASS (type={r.exception_type})')
+
+    # Syntax error captured
+    r = await execute('def add(a, b return a', 'assert True')
+    assert not r.passed, 'Syntax error should fail'
+    print(f'Syntax error capture: PASS')
+
+    # Import error captured
+    r = await execute('import nonexistent_xyz', 'assert True')
+    assert not r.passed, 'Import error should fail'
+    print(f'Import error capture: PASS')
+
+    # Solution uses importlib isolation (public names only)
+    r = await execute(
+        'def public_func(): return 42\n_private = 99',
+        'assert public_func() == 42'
+    )
+    assert r.passed, f'Public function access failed: {r.stderr}'
+    print('Public function access: PASS')
+
+    print('ALL SANDBOX CHECKS PASSED')
+
+asyncio.run(test())
+"
+]]></command>
+  <expected>All sandbox isolation tests pass including timeout, syntax error, import error capture.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 12: AGENT CONFIG PRESETS                                 -->
+<!-- ============================================================ -->
+<step id="13" name="Verify AgentConfig Presets and Field Defaults">
+  <command><![CDATA[
+python3 -c "
+from agent.config import AgentConfig
+
+dev = AgentConfig.development()
+stg = AgentConfig.staging()
+prd = AgentConfig.production()
+
+# Development should have everything disabled
+assert dev.autonomy_level == 'full_auto'
+assert dev.enable_critic == False
+assert dev.enable_spec_tests == False
+assert dev.parallel_strategies == False
+assert dev.enable_cross_session_memory == False
+assert dev.enable_checkpointing == False
+print('Development preset: PASS')
+
+# Staging should enable features with review_repairs
+assert stg.autonomy_level == 'review_repairs'
+assert stg.enable_critic == True
+assert stg.enable_spec_tests == True
+assert stg.parallel_strategies == True
+assert stg.enable_cross_session_memory == True
+assert stg.enable_checkpointing == True
+assert stg.persist_checkpoints == False
+print('Staging preset: PASS')
+
+# Production should enable everything including persistent checkpoints
+assert prd.autonomy_level == 'review_all'
+assert prd.enable_critic == True
+assert prd.enable_spec_tests == True
+assert prd.parallel_strategies == True
+assert prd.enable_cross_session_memory == True
+assert prd.enable_checkpointing == True
+assert prd.persist_checkpoints == True
+print('Production preset: PASS')
+
+# Default constructor should have sensible defaults
+default = AgentConfig()
+assert default.max_iterations == 4
+assert default.critic_confidence_threshold == 0.6
+print('Default constructor: PASS')
+
+print('ALL CONFIG CHECKS PASSED')
+"
+]]></command>
+  <expected>All three presets have correct field values. Default constructor works.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 13: METRICS MODULE                                      -->
+<!-- ============================================================ -->
+<step id="14" name="Verify Metrics Module">
+  <command><![CDATA[
+python3 -c "
+from agent.metrics import NodeMetrics, RunMetrics
+
+# NodeMetrics
+nm = NodeMetrics(node_name='test', start_time=0.0, end_time=1.5, input_tokens=100, output_tokens=50)
+assert nm.latency_seconds == 1.5
+assert nm.estimated_cost_usd >= 0
+print(f'NodeMetrics: latency={nm.latency_seconds}s cost=\${nm.estimated_cost_usd:.6f}')
+
+# RunMetrics
+rm = RunMetrics(task_id='test_task', node_metrics=[nm])
+d = rm.to_dict()
+assert d['task_id'] == 'test_task'
+assert 'nodes' in d
+assert len(d['nodes']) == 1
+assert d['nodes'][0]['name'] == 'test'
+print(f'RunMetrics.to_dict(): {list(d.keys())}')
+
+print('METRICS MODULE CHECKS PASSED')
+"
+]]></command>
+  <expected>NodeMetrics computes latency and cost. RunMetrics serializes correctly.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 14: MEMORY STORE (CHROMADB)                             -->
+<!-- ============================================================ -->
+<step id="15" name="Verify Memory Store (ChromaDB)">
+  <command><![CDATA[
+python3 -c "
+try:
+    import chromadb
+    print(f'ChromaDB version: {chromadb.__version__}')
+except ImportError:
+    print('ChromaDB not installed — SKIPPED (expected on some environments)')
+    exit(0)
+
+import tempfile
+from agent.memory_store import LessonStore
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    store = LessonStore(persist_dir=tmpdir)
+
+    # Store lessons
+    store.store_lesson('Always handle empty inputs before indexing.', 'interval_merging', 'boundary', 'test001')
+    store.store_lesson('Touching intervals need >= not > in merge condition.', 'interval_merging', 'off_by_one', 'test002')
+    print(f'Stored 2 lessons. Total: {store.total_lessons}')
+
+    # Retrieve by semantic query
+    results = store.retrieve_relevant_lessons('empty list edge case')
+    assert len(results) > 0, 'No lessons retrieved'
+    print(f'Retrieved {len(results)} lessons for query \"empty list edge case\"')
+    print(f'  Top result: {results[0][:80]}')
+
+    # Retrieve with category filter
+    results_filtered = store.retrieve_relevant_lessons('merge condition', task_category='interval_merging')
+    print(f'Retrieved {len(results_filtered)} lessons with category filter')
+
+    # Deduplication (store same lesson again)
+    store.store_lesson('Always handle empty inputs before indexing.', 'interval_merging', 'boundary', 'test001')
+    assert store.total_lessons == 2, f'Dedup failed: expected 2, got {store.total_lessons}'
+    print('Deduplication: PASS')
+
+    print('MEMORY STORE CHECKS PASSED')
+"
+]]></command>
+  <expected>If chromadb is installed: store, retrieve, and dedup all work. If not installed: gracefully skipped.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 15: EVENTS AND STREAMING                                -->
+<!-- ============================================================ -->
+<step id="16" name="Verify All Event Types and Streaming Formatters">
+  <command><![CDATA[
+python3 -c "
+from agent.events import (
+    STEP, CODE_GENERATED, FAILURE, LEARNING_UPDATE, SUCCESS,
+    TESTS_GENERATED, DIAGNOSIS, SPEC_TESTS_GENERATED, REPAIR_REVIEW,
+    TOOL_USE, CRITIC_REVIEW, PARALLEL_REPAIR,
+    step_event, code_generated_event, failure_event, success_event,
+    spec_tests_event, repair_review_event, tool_use_event, critic_event,
+    parallel_repair_event, diagnosis_event,
+)
+from framework.streaming import PUBLIC_EVENT_TYPES, format_event_for_timeline
+
+# Verify all new event types exist
+new_types = [SPEC_TESTS_GENERATED, REPAIR_REVIEW, TOOL_USE, CRITIC_REVIEW, PARALLEL_REPAIR]
+for t in new_types:
+    assert t in PUBLIC_EVENT_TYPES, f'{t} not in PUBLIC_EVENT_TYPES'
+print(f'PUBLIC_EVENT_TYPES count: {len(PUBLIC_EVENT_TYPES)}')
+
+# Verify each constructor produces a valid event dict
+constructors = [
+    ('step_event', step_event('test', iteration=1)),
+    ('code_generated_event', code_generated_event('def f(): pass', iteration=1)),
+    ('failure_event', failure_event('assert failed', iteration=1)),
+    ('success_event', success_event('def f(): pass', iteration=1)),
+    ('spec_tests_event', spec_tests_event(5, iteration=0)),
+    ('repair_review_event', repair_review_event('cause', 'logic', 'fix it', 0.8, iteration=1)),
+    ('tool_use_event', tool_use_event('run_snippet', {'code': 'x'}, 'output', iteration=1)),
+    ('critic_event', critic_event('approve', [], 0.9, iteration=1)),
+    ('parallel_repair_event', parallel_repair_event('minimal_fix', True, False, iteration=1)),
+    ('diagnosis_event', diagnosis_event('root cause', 'logic_error', 'fix', iteration=1)),
+]
+
+for name, event_obj in constructors:
+    d = event_obj.to_dict()
+    assert 'type' in d, f'{name}: missing type'
+    assert 'message' in d, f'{name}: missing message'
+    # Verify formatter doesn't crash
+    formatted = format_event_for_timeline(d)
+    assert len(formatted) > 0, f'{name}: empty formatted output'
+    print(f'  {name}: type={d[\"type\"]} formatted={formatted[:80]}')
+
+print('ALL EVENT AND STREAMING CHECKS PASSED')
+"
+]]></command>
+  <expected>All event constructors produce valid dicts. All formatters produce non-empty timeline strings.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 16: GRAPH MERMAID VISUALIZATION                         -->
+<!-- ============================================================ -->
+<step id="17" name="Verify Graph Mermaid Diagram Generation">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+from agent.graph import get_graph_mermaid
+from agent.config import AgentConfig
+
+for preset in ['development', 'staging', 'production']:
+    config = getattr(AgentConfig, preset)()
+    mermaid = get_graph_mermaid(config=config)
+    assert len(mermaid) > 50, f'{preset}: mermaid too short ({len(mermaid)} chars)'
+    assert '-->' in mermaid, f'{preset}: no edges in mermaid'
+    edge_count = mermaid.count('-->')
+    print(f'{preset}: {edge_count} edges, {len(mermaid)} chars')
+
+print('GRAPH VISUALIZATION CHECKS PASSED')
+"
+]]></command>
+  <expected>All three presets generate valid Mermaid diagrams with edges. Production has more edges than development.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 17: HUMANEVAL ADAPTER                                   -->
+<!-- ============================================================ -->
+<step id="18" name="Verify HumanEval Adapter Module Imports">
+  <command><![CDATA[
+python3 -c "
+from evaluation.humaneval_adapter import load_humaneval_tasks, humaneval_to_agent_task, extract_completion
+
+# Test extract_completion
+test_code = '''
+def has_close_elements(numbers, threshold):
+    for i in range(len(numbers)):
+        for j in range(i+1, len(numbers)):
+            if abs(numbers[i] - numbers[j]) < threshold:
+                return True
+    return False
+'''
+completion = extract_completion(test_code, 'has_close_elements')
+assert 'for i in range' in completion or 'return' in completion, f'extract_completion failed: {completion[:100]}'
+print(f'extract_completion: {len(completion)} chars extracted')
+
+# Test humaneval_to_agent_task
+task = {'prompt': 'def add(a, b):\\n    \"\"\"Add two numbers.\"\"\"\\n', 'entry_point': 'add'}
+agent_task = humaneval_to_agent_task(task)
+assert 'def add' in agent_task
+assert 'Complete' in agent_task or 'complete' in agent_task or 'implement' in agent_task.lower()
+print(f'humaneval_to_agent_task: {len(agent_task)} chars')
+
+print('HUMANEVAL ADAPTER CHECKS PASSED')
+"
+]]></command>
+  <expected>Both adapter functions work correctly without needing the actual HumanEval dataset file.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 18: BENCHMARK REFERENCE TESTS                           -->
+<!-- ============================================================ -->
+<step id="19" name="Verify Benchmark Reference Tests Are Populated">
+  <command><![CDATA[
+python3 -c "
+from evaluation.benchmark_tasks import BENCHMARK_TASKS
+
+total_ref_tests = 0
+for task in BENCHMARK_TASKS:
+    ref_code = getattr(task, 'reference_test_code', '')
+    has_ref = bool(ref_code and ref_code.strip())
+    assert_count = ref_code.count('assert') if has_ref else 0
+    total_ref_tests += assert_count
+    status = f'{assert_count} asserts' if has_ref else 'MISSING'
+    print(f'  {task.task_id}: {status}')
+    assert has_ref, f'{task.task_id} is missing reference_test_code!'
+
+print(f'Total reference test assertions across all tasks: {total_ref_tests}')
+assert total_ref_tests >= 40, f'Expected at least 40 total assertions, got {total_ref_tests}'
+print('BENCHMARK REFERENCE TESTS CHECK PASSED')
+"
+]]></command>
+  <expected>All 8 tasks have reference_test_code with at least 5 assertions each. Total >= 40.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 19: MULTI-MODEL ROUTING                                 -->
+<!-- ============================================================ -->
+<step id="20" name="Verify Multi-Model Routing">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+from llm.router import LLMRouter
+from llm.providers.mock_provider import MockProvider
+
+# Create two mock providers with different model names
+default_provider = MockProvider()
+summarizer_provider = MockProvider()
+
+router = LLMRouter(
+    provider=default_provider,
+    role_providers={'memory_summarizer': summarizer_provider}
+)
+
+# _get_provider should return the override for memory_summarizer
+p1 = router._get_provider('generator')
+p2 = router._get_provider('memory_summarizer')
+assert p1 is default_provider, 'Generator should use default provider'
+assert p2 is summarizer_provider, 'memory_summarizer should use override'
+print(f'generator provider: {p1.provider_name}')
+print(f'memory_summarizer provider: {p2.provider_name}')
+print('MULTI-MODEL ROUTING CHECK PASSED')
+"
+]]></command>
+  <expected>Generator routes to default. memory_summarizer routes to override.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 20: CI WORKFLOW FILE                                    -->
+<!-- ============================================================ -->
+<step id="21" name="Verify CI Workflow File Exists and Is Valid">
+  <command><![CDATA[
+python3 -c "
+import yaml
+from pathlib import Path
+
+ci_path = Path('.github/workflows/test.yml')
+assert ci_path.exists(), 'CI workflow file missing!'
+
+with open(ci_path) as f:
+    ci = yaml.safe_load(f)
+
+assert 'on' in ci, 'Missing trigger config'
+assert 'jobs' in ci, 'Missing jobs'
+assert 'test' in ci['jobs'], 'Missing test job'
+
+steps = ci['jobs']['test']['steps']
+step_names = [s.get('name', '') for s in steps if 'name' in s]
+print(f'CI steps: {step_names}')
+
+# Check it runs pytest
+has_pytest = any('pytest' in str(s) for s in steps)
+assert has_pytest, 'CI does not run pytest'
+
+# Check it uses LLM_PROVIDER=mock
+has_mock = any('LLM_PROVIDER' in str(s) and 'mock' in str(s) for s in steps)
+assert has_mock, 'CI does not set LLM_PROVIDER=mock'
+
+print('CI WORKFLOW CHECK PASSED')
+"
+]]></command>
+  <expected>test.yml exists, is valid YAML, runs pytest with LLM_PROVIDER=mock.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 21: README ACCURACY                                     -->
+<!-- ============================================================ -->
+<step id="22" name="Verify README Contains Updated Architecture Description">
+  <command><![CDATA[
+python3 -c "
+readme = open('README.md').read()
+
+checks = {
+    'ReAct': 'ReAct' in readme or 'react' in readme.lower(),
+    'Human-in-the-loop': 'human' in readme.lower() and 'loop' in readme.lower(),
+    'Critic': 'critic' in readme.lower() or 'Critic' in readme,
+    'Dual-oracle or spec tests': 'spec' in readme.lower() or 'dual' in readme.lower() or 'oracle' in readme.lower(),
+    'Checkpoint or time-travel': 'checkpoint' in readme.lower() or 'time-travel' in readme.lower() or 'time travel' in readme.lower(),
+    'Observability or LangSmith': 'observ' in readme.lower() or 'langsmith' in readme.lower(),
+    'Reference-validated metrics': 'reference' in readme.lower() and 'valid' in readme.lower(),
+    'ChromaDB or cross-session': 'chromadb' in readme.lower() or 'cross-session' in readme.lower() or 'cross session' in readme.lower(),
+}
+
+all_passed = True
+for check_name, passed in checks.items():
+    status = 'PASS' if passed else 'FAIL'
+    if not passed:
+        all_passed = False
+    print(f'  {check_name}: {status}')
+
+if all_passed:
+    print('README CONTENT CHECKS PASSED')
+else:
+    print('README CONTENT CHECKS: SOME MISSING (see above)')
+"
+]]></command>
+  <expected>README mentions all major new concepts. Any missing items should be noted but are not blockers.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 22: IMPORT CHAIN VERIFICATION                           -->
+<!-- ============================================================ -->
+<step id="23" name="Verify No Circular Imports">
+  <command><![CDATA[
+LLM_PROVIDER=mock python3 -c "
+# Import every module in the project to catch circular imports
+import_order = [
+    'agent.config',
+    'agent.state',
+    'agent.events',
+    'agent.metrics',
+    'agent.tools',
+    'llm.base',
+    'llm.schema_validator',
+    'llm.prompt_loader',
+    'llm.context_builder',
+    'llm.router',
+    'llm.providers.mock_provider',
+    'sandbox.python_executor',
+    'framework.event_bus',
+    'framework.streaming',
+    'agent.nodes.generate_solution',
+    'agent.nodes.create_adversarial_tests',
+    'agent.nodes.execute_solution',
+    'agent.nodes.diagnose_failure',
+    'agent.nodes.update_learning_log',
+    'agent.nodes.generate_spec_tests',
+    'agent.nodes.review_repair',
+    'agent.nodes.critic_review',
+    'agent.nodes.parallel_generate',
+    'agent.graph',
+    'evaluation.benchmark_tasks',
+    'evaluation.metrics',
+    'evaluation.humaneval_adapter',
+]
+
+for module_name in import_order:
+    try:
+        __import__(module_name)
+        print(f'  {module_name}: OK')
+    except Exception as e:
+        print(f'  {module_name}: IMPORT FAILED — {e}')
+
+print('IMPORT CHAIN VERIFICATION COMPLETE')
+"
+]]></command>
+  <expected>All modules import without circular import errors or missing dependency errors.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 23: LINTING                                             -->
+<!-- ============================================================ -->
+<step id="24" name="Run Linter">
+  <command>pip install ruff 2>&amp;1 | tail -3 &amp;&amp; ruff check . --statistics 2>&amp;1</command>
+  <expected>
+    Zero errors is ideal. Minor warnings (unused imports, line length) are acceptable.
+    Report the total count and categories of any issues found.
+  </expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- STEP 24: FILE COUNT VERIFICATION                             -->
+<!-- ============================================================ -->
+<step id="25" name="Verify All Expected Files Exist">
+  <command><![CDATA[
+python3 -c "
+from pathlib import Path
+
+expected_new_files = [
+    'agent/config.py',
+    'agent/metrics.py',
+    'agent/memory_store.py',
+    'agent/tools.py',
+    'agent/nodes/generate_spec_tests.py',
+    'agent/nodes/review_repair.py',
+    'agent/nodes/critic_review.py',
+    'agent/nodes/parallel_generate.py',
+    'prompts/critic.yaml',
+    'evaluation/humaneval_adapter.py',
+    'evaluation/run_humaneval.py',
+    'tests/test_context_builder.py',
+    'tests/test_router.py',
+    'tests/test_memory_store.py',
+    '.github/workflows/test.yml',
+]
+
+all_exist = True
+for f in expected_new_files:
+    exists = Path(f).exists()
+    status = 'EXISTS' if exists else 'MISSING'
+    if not exists:
+        all_exist = False
+    print(f'  {f}: {status}')
+
+# Count total Python files
+py_count = len(list(Path('.').rglob('*.py')))
+yaml_count = len(list(Path('prompts').rglob('*.yaml')))
+test_count = len(list(Path('tests').rglob('test_*.py')))
+
+print(f'')
+print(f'Total .py files: {py_count}')
+print(f'Total prompt YAML files: {yaml_count}')
+print(f'Total test files: {test_count}')
+
+if all_exist:
+    print('ALL EXPECTED FILES EXIST')
+else:
+    print('SOME FILES MISSING (see above)')
+"
+]]></command>
+  <expected>All 15 new files exist. Total test files should be 8+. Total prompt YAML files should be 5.</expected>
+</step>
+
+<!-- ============================================================ -->
+<!-- FINAL SUMMARY                                                -->
+<!-- ============================================================ -->
+<final_instructions>
+  After running all 25 steps, produce a summary table in this exact format:
+
+  | Step | Name | Status | Notes |
+  |------|------|--------|-------|
+  | 1 | Verify Python Version | PASS/FAIL | ... |
+  | 2 | Install Dependencies | PASS/FAIL | ... |
+  | ... | ... | ... | ... |
+  | 25 | Verify All Expected Files Exist | PASS/FAIL | ... |
+
+  Then add a final line:
+  **Overall: X/25 PASSED, Y/25 FAILED, Z/25 SKIPPED**
+
+  If any steps failed, list them with a brief explanation of what went wrong.
+</final_instructions>
+
+</prompt>

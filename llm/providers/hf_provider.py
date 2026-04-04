@@ -77,7 +77,7 @@ class HuggingFaceProvider(BaseLLMProvider):
         """Synchronous model load — runs in thread executor."""
         # Import here so package is optional at import time
         try:
-            from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+            from transformers import pipeline
             import torch
         except ImportError as exc:
             raise RuntimeError(

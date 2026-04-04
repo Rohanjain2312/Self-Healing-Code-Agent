@@ -203,7 +203,7 @@ def main() -> None:
     print(f"  Total tasks:  {stats['total']}")
     print(f"  Completed:    {stats['completed']}")
     print(f"  Errors:       {stats['errors']}")
-    print(f"\nTo compute Pass@1:")
+    print("\nTo compute Pass@1:")
     print(f"  evaluate_functional_correctness {args.output}")
 
 

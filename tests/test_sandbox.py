@@ -9,7 +9,6 @@ These tests verify the sandbox correctly:
   - Does not raise from the main process on failure
 """
 
-import asyncio
 import pytest
 from sandbox.python_executor import execute, format_failure_summary
 

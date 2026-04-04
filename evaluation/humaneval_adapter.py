@@ -96,7 +96,7 @@ def extract_completion(agent_code: str, entry_point: str) -> str:
         the function definition cannot be found.
     """
     if not agent_code.strip():
-        return f"    pass\n"
+        return "    pass\n"
 
     # Match the function definition at the start of a line
     pattern = rf"(?:^|\n)(def\s+{re.escape(entry_point)}\s*\()"

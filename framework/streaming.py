@@ -11,8 +11,6 @@ This layer is stateless — it transforms event streams without buffering state.
 The UI layer owns all display state.
 """
 
-import asyncio
-import json
 import logging
 from typing import Any, AsyncGenerator
 
@@ -24,8 +22,6 @@ from agent.events import (
     STEP,
     DIAGNOSIS,
     TESTS_GENERATED,
-    ITERATION_START,
-    TIMEOUT,
     SPEC_TESTS_GENERATED,
     REPAIR_REVIEW,
     TOOL_USE,
@@ -72,7 +68,6 @@ def format_event_for_timeline(event: dict[str, Any]) -> str:
 
     if event_type == CODE_GENERATED:
         explanation = payload.get("explanation", "")
-        code_preview = payload.get("code", "")[:80].replace("\n", " ")
         line = f"{prefix} Code generated."
         if explanation:
             line += f" Approach: {explanation}"

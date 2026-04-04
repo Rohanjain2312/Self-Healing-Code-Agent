@@ -24,9 +24,7 @@ import os
 import sys
 import tempfile
 import textwrap
-import traceback
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 @dataclass
@@ -260,7 +258,7 @@ def format_failure_summary(result: ExecutionResult) -> str:
     if result.stderr:
         # Include traceback but cap at 40 lines to avoid overwhelming the context
         tb_lines = result.stderr.splitlines()
-        relevant = [l for l in tb_lines if not l.startswith("SANDBOX_RESULT:")]
+        relevant = [ln for ln in tb_lines if not ln.startswith("SANDBOX_RESULT:")]
         if relevant:
             lines.append("Traceback (last 40 lines):")
             lines.extend(relevant[-40:])

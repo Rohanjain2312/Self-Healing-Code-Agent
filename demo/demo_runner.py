@@ -21,11 +21,9 @@ from agent.config import AgentConfig
 from agent.graph import stream_agent
 from framework.streaming import (
     format_event_for_timeline,
-    extract_learning_log,
-    extract_latest_code,
     PUBLIC_EVENT_TYPES,
 )
-from agent.events import SUCCESS, FAILURE, CODE_GENERATED, LEARNING_UPDATE, REPAIR_REVIEW
+from agent.events import SUCCESS, CODE_GENERATED, LEARNING_UPDATE, REPAIR_REVIEW
 from llm.router import LLMRouter
 
 logger = logging.getLogger(__name__)
@@ -90,7 +88,7 @@ class DemoUIState:
     def lessons_text(self) -> str:
         if not self.learning_lessons:
             return "No lessons recorded yet."
-        return "\n".join(f"• {l}" for l in self.learning_lessons)
+        return "\n".join(f"• {lesson}" for lesson in self.learning_lessons)
 
 
 async def run_demo_async(

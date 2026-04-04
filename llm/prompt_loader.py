@@ -6,8 +6,6 @@ Caches parsed YAML in memory after first load to avoid repeated disk I/O.
 Supports template variable substitution via Python str.format_map.
 """
 
-import os
-import re
 from pathlib import Path
 from typing import Any
 

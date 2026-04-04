@@ -76,4 +76,4 @@ async def update_learning_log(
 def _format_lessons(lessons: list[str]) -> str:
     if not lessons:
         return "No prior lessons."
-    return "\n".join(f"- {l}" for l in lessons)
+    return "\n".join(f"- {lesson}" for lesson in lessons)

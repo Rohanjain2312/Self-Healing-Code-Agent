@@ -8,9 +8,7 @@ The provider expects Ollama to be running at http://localhost:11434.
 Environment variable OLLAMA_BASE_URL overrides the default host.
 """
 
-import json
 import os
-import asyncio
 import httpx
 from ..base import BaseLLMProvider, InferenceRequest, InferenceResponse
 

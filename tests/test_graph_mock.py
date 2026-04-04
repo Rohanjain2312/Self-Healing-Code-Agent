@@ -6,7 +6,6 @@ a valid final state. Does not test correctness of LLM outputs —
 only the plumbing and state transitions.
 """
 
-import asyncio
 import pytest
 from agent.graph import run_agent
 from llm.router import LLMRouter
