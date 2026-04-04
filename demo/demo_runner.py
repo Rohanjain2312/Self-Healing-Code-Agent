@@ -267,7 +267,7 @@ async def run_demo_async(
 
     except Exception as exc:
         logger.error("Demo runner error: %s", exc, exc_info=True)
-        state.timeline_lines.append(f"[ERROR] Agent encountered an error: {exc}")
+        state.timeline_lines.append(f"[ERROR] {type(exc).__name__}: {exc}")
         yield (
             state.timeline_text(),
             state.code_text(),
