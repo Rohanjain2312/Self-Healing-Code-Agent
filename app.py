@@ -23,9 +23,18 @@ def _prewarm() -> None:
     """Load model weights into memory before Gradio starts accepting requests.
 
     Runs synchronously so the model is fully loaded before launch().
-    If the provider does not support pre-warming (e.g. Ollama, Mock),
-    the function exits silently.
+    API providers (Anthropic) and Ollama do not need pre-warming — skip them.
+    Only pre-warm HuggingFace Transformers (local model load takes minutes).
+
+    If ANTHROPIC_API_KEY is set, set LLM_PROVIDER=anthropic explicitly in
+    your HF Space variables to skip HuggingFace model loading entirely.
     """
+    # API providers don't load model weights locally — skip pre-warm entirely
+    llm_provider = os.environ.get("LLM_PROVIDER", "").lower()
+    if llm_provider == "anthropic" or os.environ.get("ANTHROPIC_API_KEY"):
+        logger.info("Anthropic API provider detected — skipping pre-warm.")
+        return
+
     try:
         from llm.router import LLMRouter
         router = LLMRouter()
@@ -47,11 +56,11 @@ _prewarm()
 from agent.config import AgentConfig  # noqa: E402
 from demo.app import build_app       # noqa: E402 — import after path setup
 
-# Fix 19: select config preset from environment variable
-# AGENT_PRESET=development (default) | staging | production
-_preset = os.environ.get("AGENT_PRESET", "development")
-_config = getattr(AgentConfig, _preset, AgentConfig.development)()
-logger.info("Agent preset: %s (%s)", _preset, _config)
+# All defaults are production-grade — no preset selection needed.
+# If ANTHROPIC_API_KEY is set, the router auto-selects Claude API.
+# Set LLM_PROVIDER=anthropic explicitly to skip HuggingFace model loading.
+_config = AgentConfig()
+logger.info("Agent config: %s", _config)
 
 demo = build_app(config=_config)
 demo.queue()  # required in Gradio 5 — initializes pending_message_lock before launch

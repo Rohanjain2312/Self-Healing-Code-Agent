@@ -69,4 +69,7 @@ class AgentState(TypedDict):
     strategy_name: str
 
     # --- Event stream (appended by each node for UI streaming) ---
-    events: list[dict[str, Any]]
+    # Annotated with operator.add so parallel nodes can both append events
+    # without a merge conflict (both generate_spec_tests and generate_solution
+    # run concurrently and each emit their own events).
+    events: Annotated[list[dict[str, Any]], operator.add]

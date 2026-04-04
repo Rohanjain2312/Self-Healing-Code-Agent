@@ -152,7 +152,7 @@ def _build_performance_components():
 
 
 # ---------------------------------------------------------------------------
-# Graph Topology — inline SVG diagrams (one per preset)
+# Graph Topology — single production SVG (parallel spec+solution entry)
 # ---------------------------------------------------------------------------
 
 _SVG_DEVELOPMENT = """
@@ -455,28 +455,158 @@ _SVG_PRODUCTION = """
 # Gradio UI construction
 # ---------------------------------------------------------------------------
 
-_PRESET_GRAPH: dict[str, str] = {
-    "development": _SVG_DEVELOPMENT,
-    "staging":     _SVG_STAGING,
-    "production":  _SVG_PRODUCTION,
-}
+# Single production SVG — parallel spec+solution entry, no HITL (full_auto),
+# critic always present, HF Dataset sync and SQLite checkpoint annotations.
+_PRODUCTION_SVG = """
+<div style="background:white;padding:20px;border-radius:8px;text-align:center;overflow:auto;">
+<svg width="100%" viewBox="0 0 680 940" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+    <marker id="ahd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#BA7517" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  </defs>
 
-_PRESET_DESCRIPTION: dict[str, str] = {
-    "development": (
-        "**Development** — core loop only: Generate → Adversarial Tests → "
-        "Execute → Diagnose → Repair. No optional nodes."
-    ),
-    "staging": (
-        "**Staging** — all optional nodes enabled: Spec Tests (oracle), "
-        "Critic Review, and Human-in-the-loop review before each repair. "
-        "In-memory checkpoints only."
-    ),
-    "production": (
-        "**Production** — same agent topology as staging, plus persistent "
-        "SQLite checkpoints and cross-session memory via ChromaDB synced "
-        "to HuggingFace Datasets for durability across restarts."
-    ),
-}
+  <!-- Title -->
+  <text x="340" y="28" text-anchor="middle" font-family="system-ui,sans-serif" font-size="15" font-weight="600" fill="#333">Production topology — all features enabled</text>
+  <text x="340" y="48" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#888">AgentConfig() defaults: critic + spec tests + HF memory + checkpointing</text>
+
+  <!-- USER QUERY entry pill -->
+  <rect x="250" y="64" width="180" height="36" rx="18" fill="#5F5E5A" stroke="#444441" stroke-width="0.5"/>
+  <text x="340" y="86" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">User Query</text>
+
+  <!-- Fork arrows to parallel nodes -->
+  <line x1="280" y1="100" x2="180" y2="128" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="400" y1="100" x2="490" y2="128" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- PARALLEL BAND label -->
+  <text x="340" y="118" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#aaa">parallel</text>
+
+  <!-- generate_spec_tests (left) -->
+  <rect x="60" y="128" width="220" height="56" rx="8" fill="#0F6E56" stroke="#085041" stroke-width="0.5"/>
+  <text x="170" y="153" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">generate_spec_tests</text>
+  <text x="170" y="173" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#7ECFB8">Blind oracle from spec</text>
+
+  <!-- generate_solution (right) -->
+  <rect x="400" y="128" width="220" height="56" rx="8" fill="#185FA5" stroke="#0C447C" stroke-width="0.5"/>
+  <text x="510" y="153" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">generate_solution</text>
+  <text x="510" y="173" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#8BB8E8">retrieve past lessons</text>
+
+  <!-- HF Dataset Sync annotation (top right, connected to generate_solution) -->
+  <rect x="510" y="56" width="150" height="64" rx="8" fill="#FEF3CD" stroke="#BA7517" stroke-width="1.5" stroke-dasharray="6 3"/>
+  <text x="585" y="80" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#BA7517">HF Dataset Sync</text>
+  <text x="585" y="97" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#BA7517">cross-session lessons</text>
+  <text x="585" y="112" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#BA7517">cosine dedup (0.92)</text>
+  <line x1="510" y1="88" x2="460" y2="132" stroke="#BA7517" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ahd)"/>
+  <text x="476" y="110" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#BA7517">retrieve</text>
+
+  <!-- Join arrows to create_adversarial_tests -->
+  <line x1="170" y1="184" x2="280" y2="232" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="510" y1="184" x2="400" y2="232" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- create_adversarial_tests -->
+  <rect x="200" y="232" width="280" height="44" rx="8" fill="#185FA5" stroke="#0C447C" stroke-width="0.5"/>
+  <text x="340" y="258" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">create_adversarial_tests</text>
+  <line x1="340" y1="276" x2="340" y2="300" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- execute_solution -->
+  <rect x="210" y="300" width="260" height="56" rx="8" fill="#185FA5" stroke="#0C447C" stroke-width="0.5"/>
+  <text x="340" y="325" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">execute_solution</text>
+  <text x="340" y="345" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#8BB8E8">Runs BOTH spec + adversarial</text>
+
+  <!-- pass → critic_review -->
+  <line x1="470" y1="328" x2="534" y2="328" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="502" y="320" font-family="system-ui,sans-serif" font-size="12" fill="#888">pass</text>
+
+  <!-- critic_review -->
+  <rect x="534" y="306" width="126" height="56" rx="8" fill="#534AB7" stroke="#3A3388" stroke-width="0.5"/>
+  <text x="597" y="331" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">critic_review</text>
+  <text x="597" y="351" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#B8B4F0">Self-reflection gate</text>
+
+  <!-- critic approve → END (success) -->
+  <line x1="597" y1="306" x2="597" y2="272" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="609" y="292" font-family="system-ui,sans-serif" font-size="12" fill="#888">approve</text>
+  <rect x="557" y="232" width="80" height="40" rx="20" fill="#0F6E56" stroke="#085041" stroke-width="0.5"/>
+  <text x="597" y="256" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">END</text>
+
+  <!-- critic reject → diagnose_failure -->
+  <line x1="534" y1="356" x2="474" y2="408" stroke="#888" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ah)"/>
+  <text x="516" y="380" font-family="system-ui,sans-serif" font-size="12" fill="#888">reject</text>
+
+  <!-- fail → diagnose_failure -->
+  <line x1="340" y1="356" x2="340" y2="396" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="356" y="380" font-family="system-ui,sans-serif" font-size="12" fill="#888">fail</text>
+
+  <!-- diagnose_failure -->
+  <rect x="210" y="396" width="260" height="56" rx="8" fill="#993C1D" stroke="#712B13" stroke-width="0.5"/>
+  <text x="340" y="421" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">diagnose_failure</text>
+  <text x="340" y="441" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#F0997B">ReAct loop with tools</text>
+  <line x1="340" y1="452" x2="340" y2="476" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- update_learning_log -->
+  <rect x="210" y="476" width="260" height="44" rx="8" fill="#185FA5" stroke="#0C447C" stroke-width="0.5"/>
+  <text x="340" y="502" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">update_learning_log</text>
+  <line x1="340" y1="520" x2="340" y2="544" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- persist → HF Dataset Sync dashed arrow (right side) -->
+  <path d="M470 498 L585 498 L585 120" fill="none" stroke="#BA7517" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ahd)"/>
+  <text x="540" y="490" font-family="system-ui,sans-serif" font-size="11" fill="#BA7517">persist lessons</text>
+
+  <!-- increment_iteration -->
+  <rect x="210" y="544" width="260" height="44" rx="8" fill="#5F5E5A" stroke="#444441" stroke-width="0.5"/>
+  <text x="340" y="570" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">increment_iteration</text>
+
+  <!-- SQLite checkpoints annotation (right of increment_iteration) -->
+  <rect x="490" y="536" width="138" height="56" rx="8" fill="#F0F0FF" stroke="#7B7ACF" stroke-width="1.5" stroke-dasharray="6 3"/>
+  <text x="559" y="558" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#534AB7">SQLite</text>
+  <text x="559" y="574" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#534AB7">Checkpoints</text>
+  <text x="559" y="585" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#7B7ACF">time-travel debug</text>
+  <line x1="490" y1="566" x2="472" y2="566" stroke="#7B7ACF" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ah)"/>
+
+  <!-- max iter → END (failure) -->
+  <line x1="340" y1="588" x2="340" y2="612" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="356" y="604" font-family="system-ui,sans-serif" font-size="12" fill="#888">max iter?</text>
+
+  <!-- routing diamond placeholder lines -->
+  <line x1="210" y1="566" x2="120" y2="566" stroke="#888" stroke-width="1.5"/>
+  <line x1="120" y1="566" x2="120" y2="156" stroke="#888" stroke-width="1.5"/>
+  <line x1="120" y1="156" x2="400" y2="156" stroke="#888" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="100" y="370" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#888" transform="rotate(-90 100 370)">repair loop → generate_solution</text>
+
+  <!-- END (max iterations) -->
+  <rect x="290" y="612" width="100" height="40" rx="20" fill="#A32D2D" stroke="#791F1F" stroke-width="0.5"/>
+  <text x="340" y="636" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="500" fill="white">END</text>
+
+  <!-- Legend -->
+  <rect x="20" y="672" width="640" height="244" rx="8" fill="#F8F8F8" stroke="#DDD" stroke-width="1"/>
+  <text x="340" y="694" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#555">Legend</text>
+  <rect x="40" y="706" width="14" height="14" rx="3" fill="#185FA5"/>
+  <text x="60" y="718" font-family="system-ui,sans-serif" font-size="12" fill="#555">Core pipeline node</text>
+  <rect x="40" y="728" width="14" height="14" rx="3" fill="#0F6E56"/>
+  <text x="60" y="740" font-family="system-ui,sans-serif" font-size="12" fill="#555">Spec test generator / success END</text>
+  <rect x="40" y="750" width="14" height="14" rx="3" fill="#993C1D"/>
+  <text x="60" y="762" font-family="system-ui,sans-serif" font-size="12" fill="#555">Diagnosis — ReAct loop with tools</text>
+  <rect x="40" y="772" width="14" height="14" rx="3" fill="#5F5E5A"/>
+  <text x="60" y="784" font-family="system-ui,sans-serif" font-size="12" fill="#555">Control flow / entry</text>
+  <rect x="240" y="706" width="14" height="14" rx="3" fill="#534AB7"/>
+  <text x="260" y="718" font-family="system-ui,sans-serif" font-size="12" fill="#555">Critic review gate</text>
+  <rect x="240" y="728" width="14" height="14" rx="3" fill="#A32D2D"/>
+  <text x="260" y="740" font-family="system-ui,sans-serif" font-size="12" fill="#555">Failure / max-iter END</text>
+  <rect x="240" y="750" width="14" height="14" rx="3" fill="#FEF3CD" stroke="#BA7517" stroke-width="1.5"/>
+  <text x="260" y="762" font-family="system-ui,sans-serif" font-size="12" fill="#555">HF Dataset Sync (external)</text>
+  <rect x="240" y="772" width="14" height="14" rx="3" fill="#F0F0FF" stroke="#7B7ACF" stroke-width="1.5"/>
+  <text x="260" y="784" font-family="system-ui,sans-serif" font-size="12" fill="#555">SQLite Checkpoints (external)</text>
+  <text x="340" y="814" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#888">Dashed border = external persistent storage  ·  Dashed line = async side-effect</text>
+  <text x="340" y="832" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#888">Parallel fan-in: generate_spec_tests + generate_solution both complete before create_adversarial_tests starts</text>
+  <text x="340" y="850" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#888">Repair loop returns to generate_solution only (spec tests run once per task, not per iteration)</text>
+  <text x="340" y="868" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#888">autonomy_level=full_auto — no HITL interrupt (required for Gradio/HF Spaces compatibility)</text>
+  <text x="340" y="886" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#888">Provider: Claude Haiku 4.5 via Anthropic API (auto-selected when ANTHROPIC_API_KEY is set)</text>
+  <text x="340" y="904" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#888">Semantic dedup threshold: cosine similarity &gt; 0.92 filters paraphrase lessons before HF sync</text>
+</svg>
+</div>
+"""
 
 
 def build_app(config: AgentConfig | None = None) -> gr.Blocks:
@@ -484,16 +614,12 @@ def build_app(config: AgentConfig | None = None) -> gr.Blocks:
     Build the Gradio application.
 
     Args:
-        config: AgentConfig preset to use as the default for the live agent tab.
-                Defaults to AgentConfig.development(). The UI also lets users
-                switch presets interactively (Fix 19).
+        config: AgentConfig to use. Defaults to AgentConfig() (production defaults).
     """
     if config is None:
-        config = AgentConfig.development()
+        config = AgentConfig()
 
     summary_text, cat_fig, iter_fig = _build_performance_components()
-
-    default_preset = "development"
 
     css = """
     .timeline-box { font-family: monospace; font-size: 0.85rem; }
@@ -515,27 +641,6 @@ diagnoses failures, and repairs solutions through structured iteration.
 
         # ── Tab 1: Run Live Agent ────────────────────────────────────────────
         with gr.Tab("Run Live Agent"):
-
-            # ── Fix 19: Preset selector ──────────────────────────────────────
-            with gr.Accordion("Agent Configuration", open=False):
-                gr.Markdown(
-                    "Select a preset to configure which features are enabled. "
-                    "Changes take effect on the next **Run Agent** click."
-                )
-                preset_radio = gr.Radio(
-                    choices=["development", "staging", "production"],
-                    value="development",
-                    label="Preset",
-                    info=(
-                        "development = no extra features (fast). "
-                        "staging = critic + spec tests + parallel repair. "
-                        "production = all features + human review before each repair."
-                    ),
-                )
-                with gr.Row(visible=False):
-                    gr.Checkbox(label="Enable Critic", value=False)
-                    gr.Checkbox(label="Enable Spec Tests", value=False)
-                    gr.Checkbox(label="Parallel Repair Strategies", value=False)
 
             with gr.Row():
                 with gr.Column(scale=2):
@@ -600,8 +705,8 @@ diagnoses failures, and repairs solutions through structured iteration.
                 outputs=[task_input, timeline, code_output, learning_log],
             )
 
-            def _run_streaming(task: str, preset: str):
-                """Generator function for Gradio streaming — respects preset config."""
+            def _run_streaming(task: str):
+                """Generator function for Gradio streaming."""
                 if not task or not task.strip():
                     yield (
                         "Please enter a task description.",
@@ -610,41 +715,22 @@ diagnoses failures, and repairs solutions through structured iteration.
                     )
                     return
 
-                # Resolve AgentConfig from preset name (Fix 19)
-                run_config = getattr(AgentConfig, preset, AgentConfig.development)()
-
                 for timeline_text, code_text, lessons_text in run_demo_sync(
-                    task, config=run_config
+                    task, config=config
                 ):
                     yield timeline_text, code_text, lessons_text
 
             run_btn.click(
                 fn=_run_streaming,
-                inputs=[task_input, preset_radio],
+                inputs=[task_input],
                 outputs=[timeline, code_output, learning_log],
             )
 
         # ── Tab 2: Graph Topology ─────────────────────────────────────────────
         with gr.Tab("Graph Topology"):
-            gr.Markdown("## Agent Graph Topology")
-
-            graph_desc = gr.Markdown(
-                value=_PRESET_DESCRIPTION[default_preset],
-            )
-
-            graph_image = gr.HTML(
-                value=_PRESET_GRAPH[default_preset],
-                label="Agent Graph Topology",
-            )
-
-            def _update_graph(preset: str):
-                return _PRESET_DESCRIPTION[preset], _PRESET_GRAPH[preset]
-
-            preset_radio.change(
-                fn=_update_graph,
-                inputs=[preset_radio],
-                outputs=[graph_desc, graph_image],
-            )
+            gr.Markdown("## Agent graph topology")
+            gr.Markdown("Production configuration — all features enabled.")
+            gr.HTML(value=_PRODUCTION_SVG)
 
         # ── Tab 3: Performance ───────────────────────────────────────────────
         with gr.Tab("Performance"):
@@ -684,7 +770,7 @@ Benchmark runs are executed on GPU (Colab) — results loaded from precomputed d
 
 
 def main() -> None:
-    app = build_app(config=AgentConfig.development())
+    app = build_app(config=AgentConfig())
     app.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),

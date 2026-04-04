@@ -22,6 +22,9 @@ accelerate>=0.27.0
 # Ollama client (local dev)
 ollama>=0.2.0
 
+# Anthropic Claude API
+anthropic>=0.42.0
+
 # Demo UI — pinned to 5.x for Python 3.13 compatibility (audioop removed in 3.13)
 gradio==6.6.0
 

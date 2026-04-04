@@ -23,9 +23,11 @@ Target graph topology (with all features enabled via AgentConfig):
           ↓
   generate_solution  (repair cycle)
 
-When AgentConfig.development() is used (or no config provided), the graph
-collapses back to the original linear topology with no HITL, no spec tests,
-no checkpointing — exactly matching the pre-upgrade behavior.
+All features are enabled by default (AgentConfig() has production-grade defaults):
+spec tests and solution generation run in parallel, critic review is always
+present, and cross-session memory is enabled. Only HITL review_repair is
+opt-in (autonomy_level != full_auto), since interrupt() is incompatible
+with the Gradio demo runner on HF Spaces.
 
 Node functions that require the LLM router are bound via functools.partial
 before registration, keeping nodes pure functions for easy unit testing.
@@ -207,7 +209,7 @@ def build_graph(
         Compiled LangGraph StateGraph (CompiledGraph) ready for ainvoke/astream.
     """
     if config is None:
-        config = AgentConfig.development()
+        config = AgentConfig()
 
     # Fix 17: build role-specific provider overrides from config.model_overrides
     if router is None:
@@ -234,51 +236,39 @@ def build_graph(
     graph.add_node("increment_iteration", _increment_iteration)
     graph.add_node("max_iterations", lambda s: {"status": "max_iterations_reached"})
 
-    # ── Optional: spec test node (Fix 5) ─────────────────────────────────────
-    if config.enable_spec_tests:
-        graph.add_node("generate_spec_tests", _spec_tests)
-        graph.set_entry_point("generate_spec_tests")
-        graph.add_edge("generate_spec_tests", "generate_solution")
-    else:
-        graph.set_entry_point("generate_solution")
-
-    # ── Linear flow: generate → qa → execute ─────────────────────────────────
+    # ── Parallel entry: spec tests + solution generation run concurrently ────
+    # Both nodes start from __start__; LangGraph joins at create_adversarial_tests.
+    # spec_test_code and current_code are written to independent state fields,
+    # so there is no merge conflict. The repair loop returns only to
+    # generate_solution (spec tests run once at the start, not on each repair).
+    graph.add_node("generate_spec_tests", _spec_tests)
+    graph.add_edge("__start__", "generate_spec_tests")
+    graph.add_edge("__start__", "generate_solution")
+    graph.add_edge("generate_spec_tests", "create_adversarial_tests")
     graph.add_edge("generate_solution", "create_adversarial_tests")
     graph.add_edge("create_adversarial_tests", "execute_solution")
 
-    # ── Optional: critic node (Fix 15) ───────────────────────────────────────
-    _route_exec = _make_route_after_execution(config.enable_critic)
-    if config.enable_critic:
-        graph.add_node("critic_review", _critic)
-        graph.add_conditional_edges(
-            "execute_solution",
-            _route_exec,
-            {
-                "critic_review": "critic_review",
-                "diagnose_failure": "diagnose_failure",
-                "max_iterations": "max_iterations",
-                "__end__": END,
-            },
-        )
-        graph.add_conditional_edges(
-            "critic_review",
-            _route_after_critic,
-            {
-                "__end__": END,
-                "diagnose_failure": "diagnose_failure",
-            },
-        )
-    else:
-        # No critic — direct routing after execution
-        graph.add_conditional_edges(
-            "execute_solution",
-            _route_exec,
-            {
-                "__end__": END,
-                "diagnose_failure": "diagnose_failure",
-                "max_iterations": "max_iterations",
-            },
-        )
+    # ── Critic node (Fix 15) — always present ────────────────────────────────
+    _route_exec = _make_route_after_execution(enable_critic=True)
+    graph.add_node("critic_review", _critic)
+    graph.add_conditional_edges(
+        "execute_solution",
+        _route_exec,
+        {
+            "critic_review": "critic_review",
+            "diagnose_failure": "diagnose_failure",
+            "max_iterations": "max_iterations",
+            "__end__": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "critic_review",
+        _route_after_critic,
+        {
+            "__end__": END,
+            "diagnose_failure": "diagnose_failure",
+        },
+    )
 
     # ── Confidence-aware routing after diagnosis (Fix 7) ─────────────────────
     graph.add_conditional_edges(
@@ -406,7 +396,7 @@ async def run_agent(
     For streaming use cases, use stream_agent() instead.
     """
     if config is None:
-        config = AgentConfig.development()
+        config = AgentConfig()
 
     # Fix 10: create LessonStore once and share it with build_graph + post-run persistence
     lesson_store = None
@@ -468,7 +458,7 @@ async def stream_agent(
     after the stream completes (requires consuming the full generator).
     """
     if config is None:
-        config = AgentConfig.development()
+        config = AgentConfig()
 
     lesson_store = None
     if config.enable_cross_session_memory:

@@ -9,8 +9,9 @@ Nodes NEVER call providers directly. This ensures:
 
 Provider selection priority:
   1. Explicit provider passed to Router constructor (test injection)
-  2. Environment variable: LLM_PROVIDER = ollama | huggingface | mock
-  3. Auto-detection: Ollama health check → HuggingFace → Mock fallback
+  2. Environment variable: LLM_PROVIDER = mock | huggingface | ollama | anthropic
+  3. Auto-detection: ANTHROPIC_API_KEY present → AnthropicProvider
+  4. Auto-detection: Ollama health check → HuggingFace → Mock fallback
 """
 
 import asyncio
@@ -60,7 +61,20 @@ def _resolve_provider() -> BaseLLMProvider:
         from .providers.ollama_provider import OllamaProvider
         return OllamaProvider()
 
-    # Auto-detect: try Ollama first using the synchronous health-check.
+    if env_provider == "anthropic":
+        from .providers.anthropic_provider import AnthropicProvider
+        return AnthropicProvider()
+
+    # Auto-detect: Anthropic API key present → use Claude (fast, no model download)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            from .providers.anthropic_provider import AnthropicProvider
+            logger.info("Auto-selected Anthropic provider (ANTHROPIC_API_KEY found)")
+            return AnthropicProvider()
+        except Exception as exc:
+            logger.warning("Anthropic provider init failed: %s", exc)
+
+    # Auto-detect: try Ollama next using the synchronous health-check.
     # is_available_sync() uses httpx's sync client so it never touches the
     # event loop — safe to call at router construction time regardless of
     # whether an async loop is already running.

@@ -5,13 +5,13 @@ AgentConfig centralizes all feature flags in one place so the graph topology,
 node behavior, and UI can all adapt from a single source of truth.
 
 Autonomy levels:
-  full_auto      — no human interrupts (default, matches existing behavior)
+  full_auto      — no human interrupts (default; required for Gradio/HF Spaces
+                   since interrupt() is incompatible with the demo runner)
   review_repairs — pause before each repair for human approval via interrupt()
   review_all     — pause before initial generation AND before each repair
 
-Design decision: all new features default to False/disabled so that
-AgentConfig.development() always reproduces the original behavior without
-requiring any migration of existing call sites.
+All defaults are production-grade settings: critic, spec tests, cross-session
+memory, and checkpointing are all enabled out of the box.
 """
 
 from dataclasses import dataclass, field
@@ -26,6 +26,7 @@ class AgentConfig:
 
     # ── Autonomy / HITL ───────────────────────────────────────────────────────
     # "full_auto" | "review_repairs" | "review_all"
+    # Keep full_auto as default — interrupt() cannot be used in Gradio on HF Spaces.
     autonomy_level: str = "full_auto"
 
     # ── Parallel repair strategies (Fix 14) ───────────────────────────────────
@@ -39,7 +40,7 @@ class AgentConfig:
     enable_spec_tests: bool = True
 
     # ── Cross-session memory via ChromaDB (Fix 10) ────────────────────────────
-    enable_cross_session_memory: bool = False
+    enable_cross_session_memory: bool = True
     memory_persist_dir: str = ".agent_memory"
 
     # ── Observability ─────────────────────────────────────────────────────────
@@ -48,58 +49,9 @@ class AgentConfig:
 
     # ── Checkpointing (Fix 13) ────────────────────────────────────────────────
     enable_checkpointing: bool = True
-    persist_checkpoints: bool = False   # True → SqliteSaver; False → InMemorySaver
+    # SQLite on HF Spaces is ephemeral — keep in-memory by default
+    persist_checkpoints: bool = False
 
     # ── Model routing overrides ───────────────────────────────────────────────
     # Map role name → model name to override per-role model selection
     model_overrides: dict[str, str] = field(default_factory=dict)
-
-    # ── Preset factory methods ────────────────────────────────────────────────
-
-    @classmethod
-    def development(cls) -> "AgentConfig":
-        """
-        Mirrors the original hardcoded graph — no new features enabled.
-
-        Use this when you want to reproduce pre-upgrade behavior exactly,
-        or to run the mock test suite without triggering any HITL/critic paths.
-        """
-        return cls(
-            autonomy_level="full_auto",
-            parallel_strategies=False,
-            enable_critic=False,
-            enable_spec_tests=False,
-            enable_cross_session_memory=False,
-            enable_checkpointing=False,
-            persist_checkpoints=False,
-        )
-
-    @classmethod
-    def staging(cls) -> "AgentConfig":
-        """
-        All agentic features on; human review before each repair; in-memory checkpoints.
-        """
-        return cls(
-            autonomy_level="review_repairs",
-            parallel_strategies=True,
-            enable_critic=True,
-            enable_spec_tests=True,
-            enable_cross_session_memory=True,
-            enable_checkpointing=True,
-            persist_checkpoints=False,
-        )
-
-    @classmethod
-    def production(cls) -> "AgentConfig":
-        """
-        Full production mode: review all actions, persistent SQLite checkpoints.
-        """
-        return cls(
-            autonomy_level="review_all",
-            parallel_strategies=True,
-            enable_critic=True,
-            enable_spec_tests=True,
-            enable_cross_session_memory=True,
-            enable_checkpointing=True,
-            persist_checkpoints=True,
-        )
