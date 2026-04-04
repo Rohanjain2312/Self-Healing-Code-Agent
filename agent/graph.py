@@ -421,15 +421,32 @@ async def run_agent(
 
     # Persist lessons learned during this run for future sessions
     if lesson_store is not None:
-        for lesson in final_state.get("learning_log", []):
+        from datetime import datetime, timezone
+        from agent.hf_memory_sync import compute_fingerprint
+
+        final_log = final_state.get("learning_log", [])
+        failure_category = final_state.get("failure_category", "")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        lesson_dicts: list[dict] = []
+
+        for lesson in final_log:
             lesson_store.store_lesson(
                 lesson,
-                failure_category=final_state.get("failure_category", ""),
+                failure_category=failure_category,
                 task_id=task_description[:100],
             )
-        logger.info(
-            "Cross-session memory: persisted %d lessons", len(final_state.get("learning_log", []))
-        )
+            lesson_dicts.append({
+                "lesson": lesson,
+                "task_id": task_description[:100],
+                "failure_category": failure_category,
+                "timestamp": timestamp,
+                "fingerprint": compute_fingerprint(lesson),
+            })
+
+        logger.info("Cross-session memory: persisted %d lessons locally.", len(lesson_dicts))
+
+        if lesson_dicts:
+            await lesson_store.sync_to_hf(lesson_dicts, router=router)
 
     return final_state
 
@@ -483,11 +500,24 @@ async def stream_agent(
 
     # Persist lessons for future cross-session retrieval
     if lesson_store is not None and final_learning_log:
+        from datetime import datetime, timezone
+        from agent.hf_memory_sync import compute_fingerprint
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        lesson_dicts: list[dict] = []
+
         for lesson in final_learning_log:
-            lesson_store.store_lesson(
-                lesson,
-                task_id=task_description[:100],
-            )
+            lesson_store.store_lesson(lesson, task_id=task_description[:100])
+            lesson_dicts.append({
+                "lesson": lesson,
+                "task_id": task_description[:100],
+                "failure_category": "",
+                "timestamp": timestamp,
+                "fingerprint": compute_fingerprint(lesson),
+            })
+
+        if lesson_dicts:
+            await lesson_store.sync_to_hf(lesson_dicts, router=router)
 
 
 async def run_agent_with_history(
