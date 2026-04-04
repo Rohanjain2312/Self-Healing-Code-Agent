@@ -34,7 +34,6 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 import gradio as gr  # noqa: E402
 
 from agent.config import AgentConfig  # noqa: E402
-from agent.graph import get_graph_mermaid  # noqa: E402
 from demo.demo_runner import EXAMPLE_TASKS, run_demo_sync  # noqa: E402
 from evaluation.metrics import load_results  # noqa: E402
 
@@ -156,19 +155,29 @@ def _build_performance_components():
 # Gradio UI construction
 # ---------------------------------------------------------------------------
 
-def _mermaid_html(diagram: str) -> str:
-    """Render a Mermaid diagram string as an HTML snippet using Mermaid.js CDN."""
-    # Escape backticks and backslashes that would break the JS template literal
-    safe_diagram = diagram.replace("\\", "\\\\").replace("`", "\\`")
-    return f"""
-<div id="mermaid-container" style="background:#1e1e2e;border-radius:8px;padding:16px;overflow:auto;max-height:420px;">
-  <div class="mermaid" style="text-align:center;">{safe_diagram}</div>
-</div>
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});
-</script>
-"""
+_GRAPHS_DIR = _PROJECT_ROOT / "assets" / "screenshots" / "graphs"
+
+_PRESET_GRAPH: dict[str, str] = {
+    "development": str(_GRAPHS_DIR / "graph_development.png"),
+    "staging":     str(_GRAPHS_DIR / "graph_production.png"),
+    "production":  str(_GRAPHS_DIR / "graph_production.png"),
+}
+
+_PRESET_DESCRIPTION: dict[str, str] = {
+    "development": (
+        "**Development** — core loop only: Generate → Adversarial Tests → "
+        "Execute → Diagnose → Repair. No optional nodes."
+    ),
+    "staging": (
+        "**Staging** — all optional nodes enabled: Spec Tests (oracle), "
+        "Critic Review, Parallel Repair Strategies, and Human-in-the-loop "
+        "review before each repair."
+    ),
+    "production": (
+        "**Production** — same topology as staging with persistent "
+        "checkpointing and cross-session memory enabled."
+    ),
+}
 
 
 def build_app(config: AgentConfig | None = None) -> gr.Blocks:
@@ -185,8 +194,7 @@ def build_app(config: AgentConfig | None = None) -> gr.Blocks:
 
     summary_text, cat_fig, iter_fig = _build_performance_components()
 
-    # Pre-generate graph diagram for the default config (Fix 18)
-    default_mermaid = get_graph_mermaid(config=AgentConfig.development())
+    default_preset = "development"
 
     css = """
     .timeline-box { font-family: monospace; font-size: 0.85rem; }
@@ -317,40 +325,28 @@ diagnoses failures, and repairs solutions through structured iteration.
                 outputs=[timeline, code_output, learning_log],
             )
 
-        # ── Tab 2: Graph Topology (Fix 18) ───────────────────────────────────
+        # ── Tab 2: Graph Topology ─────────────────────────────────────────────
         with gr.Tab("Graph Topology"):
-            gr.Markdown(
-                """
-## Agent Graph Topology
+            gr.Markdown("## Agent Graph Topology")
 
-The diagram below shows the LangGraph state machine for the **development** preset
-(no optional nodes). Switch presets in Tab 1 to enable additional nodes
-(critic, spec tests, parallel repair strategies).
-                """
+            graph_desc = gr.Markdown(
+                value=_PRESET_DESCRIPTION[default_preset],
             )
 
-            # Live diagram: update when preset changes
-            graph_html = gr.HTML(
-                value=_mermaid_html(default_mermaid),
-                label="Agent Graph (Mermaid)",
-            )
-
-            mermaid_src = gr.Textbox(
-                label="Mermaid source (copy into mermaid.live to edit)",
-                value=default_mermaid,
-                lines=20,
+            graph_image = gr.Image(
+                value=_PRESET_GRAPH[default_preset],
+                label="Agent Graph Topology",
                 interactive=False,
+                show_download_button=False,
             )
 
             def _update_graph(preset: str):
-                cfg = getattr(AgentConfig, preset, AgentConfig.development)()
-                diagram = get_graph_mermaid(config=cfg)
-                return _mermaid_html(diagram), diagram
+                return _PRESET_DESCRIPTION[preset], _PRESET_GRAPH[preset]
 
             preset_radio.change(
                 fn=_update_graph,
                 inputs=[preset_radio],
-                outputs=[graph_html, mermaid_src],
+                outputs=[graph_desc, graph_image],
             )
 
         # ── Tab 3: Performance ───────────────────────────────────────────────
