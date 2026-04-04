@@ -655,7 +655,7 @@ diagnoses failures, and repairs solutions through structured iteration.
                         clear_btn = gr.Button("Clear", variant="secondary")
 
                     gr.Markdown("**Example Tasks:**")
-                    for i, ex in enumerate(EXAMPLE_TASKS[:3]):
+                    for i, ex in enumerate(EXAMPLE_TASKS[:4]):
                         gr.Button(
                             f"Example {i + 1}: {ex[:60]}...",
                             size="sm",

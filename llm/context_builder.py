@@ -13,7 +13,7 @@ The approximation: 1 token ≈ 4 characters (conservative for English code).
 from typing import Any
 
 _CHARS_PER_TOKEN = 4  # conservative approximation
-_DEFAULT_MAX_TOKENS = 3072  # leave headroom for system prompt + output
+_DEFAULT_MAX_TOKENS = 6144  # increased from 3072 to handle long task descriptions
 
 
 def _estimate_tokens(text: str) -> int:
