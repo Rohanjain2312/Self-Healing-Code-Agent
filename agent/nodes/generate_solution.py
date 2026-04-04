@@ -7,7 +7,7 @@ the specific root cause rather than rewriting from scratch.
 """
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent.state import AgentState
 from agent.events import (
@@ -16,17 +16,22 @@ from agent.events import (
 )
 from llm.router import LLMRouter
 
+if TYPE_CHECKING:
+    from agent.memory_store import LessonStore
+
 logger = logging.getLogger(__name__)
 
 
 async def generate_solution(
     state: AgentState,
     router: LLMRouter,
+    lesson_store: "LessonStore | None" = None,
 ) -> dict[str, Any]:
     """
     LangGraph node: generate or repair code.
 
     On iteration 0: calls 'initial' template with task + learning log.
+      If lesson_store is provided, cross-session lessons are prepended to learning_log.
     On iteration N>0: calls 'repair' template with full diagnosis context.
     """
     iteration = state.get("iteration", 0)
@@ -43,7 +48,20 @@ async def generate_solution(
         and state.get("root_cause", "")
     )
 
-    learning_log = _format_learning_log(state.get("learning_log", []))
+    # Fix 10: at iteration 0, prepend cross-session lessons from the vector store
+    current_lessons = list(state.get("learning_log", []))
+    if iteration == 0 and lesson_store is not None:
+        retrieved = lesson_store.retrieve_relevant_lessons(
+            query=state["task_description"],
+            n_results=3,
+        )
+        if retrieved:
+            logger.info(
+                "Cross-session memory: prepending %d retrieved lessons", len(retrieved)
+            )
+            current_lessons = retrieved + current_lessons
+
+    learning_log = _format_learning_log(current_lessons)
 
     if is_repair:
         template_key = "repair"

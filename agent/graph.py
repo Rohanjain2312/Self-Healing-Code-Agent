@@ -191,6 +191,7 @@ def _build_role_providers(config: AgentConfig) -> dict:
 def build_graph(
     router: LLMRouter | None = None,
     config: AgentConfig | None = None,
+    lesson_store: Any = None,
 ) -> Any:
     """
     Construct and compile the agent state graph.
@@ -199,6 +200,8 @@ def build_graph(
         router: Optional pre-constructed LLMRouter. If None, auto-resolved.
         config: Optional AgentConfig controlling feature flags.
                 Defaults to AgentConfig.development() (original behavior).
+        lesson_store: Optional LessonStore for cross-session memory (Fix 10).
+                      If None, no cross-session retrieval at iteration 0.
 
     Returns:
         Compiled LangGraph StateGraph (CompiledGraph) ready for ainvoke/astream.
@@ -211,8 +214,8 @@ def build_graph(
         role_providers = _build_role_providers(config)
         router = LLMRouter(role_providers=role_providers)
 
-    # Bind router to all nodes that require it (partial application)
-    _generate = functools.partial(generate_solution, router=router)
+    # Bind router (and optional lesson_store) to all nodes that require it
+    _generate = functools.partial(generate_solution, router=router, lesson_store=lesson_store)
     _qa = functools.partial(create_adversarial_tests, router=router)
     _diagnose = functools.partial(diagnose_failure, router=router)
     _memory = functools.partial(update_learning_log, router=router)
@@ -396,12 +399,38 @@ async def run_agent(
     config defaults to AgentConfig.development() — identical to pre-upgrade
     behavior — so all existing call sites continue to work without changes.
 
+    If config.enable_cross_session_memory is True, a LessonStore is created,
+    injected into the graph for retrieval at iteration 0, and the final
+    learning_log is persisted back to the store after the run completes.
+
     For streaming use cases, use stream_agent() instead.
     """
-    app = build_graph(router=router, config=config)
+    if config is None:
+        config = AgentConfig.development()
+
+    # Fix 10: create LessonStore once and share it with build_graph + post-run persistence
+    lesson_store = None
+    if config.enable_cross_session_memory:
+        from agent.memory_store import LessonStore
+        lesson_store = LessonStore(config.memory_persist_dir)
+
+    app = build_graph(router=router, config=config, lesson_store=lesson_store)
     initial_state = _make_initial_state(task_description, max_iterations)
     thread_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     final_state = await app.ainvoke(initial_state, thread_config)
+
+    # Persist lessons learned during this run for future sessions
+    if lesson_store is not None:
+        for lesson in final_state.get("learning_log", []):
+            lesson_store.store_lesson(
+                lesson,
+                failure_category=final_state.get("failure_category", ""),
+                task_id=task_description[:100],
+            )
+        logger.info(
+            "Cross-session memory: persisted %d lessons", len(final_state.get("learning_log", []))
+        )
+
     return final_state
 
 
@@ -417,18 +446,33 @@ async def stream_agent(
     Yields event dicts from AgentState.events. The caller receives events
     in real-time rather than waiting for the full run to complete.
     Consumed by the Gradio demo for live UI updates.
+
+    If config.enable_cross_session_memory is True, lessons are persisted
+    after the stream completes (requires consuming the full generator).
     """
-    app = build_graph(router=router, config=config)
+    if config is None:
+        config = AgentConfig.development()
+
+    lesson_store = None
+    if config.enable_cross_session_memory:
+        from agent.memory_store import LessonStore
+        lesson_store = LessonStore(config.memory_persist_dir)
+
+    app = build_graph(router=router, config=config, lesson_store=lesson_store)
     initial_state = _make_initial_state(task_description, max_iterations)
     thread_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
 
     # Track total events seen to yield only genuinely new ones per node update
     total_seen = 0
+    final_learning_log: list[str] = []
 
     async for state_update in app.astream(initial_state, thread_config):
         for node_name, node_state in state_update.items():
             if not isinstance(node_state, dict):
                 continue
+            # Capture the latest learning_log for post-stream persistence
+            if "learning_log" in node_state:
+                final_learning_log = node_state["learning_log"]
             events = node_state.get("events", [])
             if not events:
                 continue
@@ -436,6 +480,14 @@ async def stream_agent(
             total_seen = len(events)
             for event in new_events:
                 yield event
+
+    # Persist lessons for future cross-session retrieval
+    if lesson_store is not None and final_learning_log:
+        for lesson in final_learning_log:
+            lesson_store.store_lesson(
+                lesson,
+                task_id=task_description[:100],
+            )
 
 
 async def run_agent_with_history(
@@ -497,3 +549,40 @@ async def fork_from_iteration(
         target.config, values=modified_state, as_node="diagnose_failure"
     )
     return await app.ainvoke(None, fork_config)
+
+
+def get_graph_mermaid(
+    config: AgentConfig | None = None,
+    router: LLMRouter | None = None,
+) -> str:
+    """
+    Generate a Mermaid diagram string for the agent graph topology (Fix 18).
+
+    Builds the graph with the given config, calls LangGraph's built-in
+    draw_mermaid() method, and returns the diagram string. Falls back to
+    a static minimal diagram on any error.
+
+    Args:
+        config: AgentConfig controlling which nodes are included.
+                Defaults to AgentConfig.development().
+        router: Optional router (only needed for graph construction, not inference).
+
+    Returns:
+        Mermaid diagram string (e.g. "graph TD\\n  A --> B").
+    """
+    try:
+        app = build_graph(router=router, config=config)
+        return app.get_graph().draw_mermaid()
+    except Exception as exc:
+        logger.warning("Could not generate Mermaid diagram: %s", exc)
+        # Minimal static fallback so the UI always shows something
+        return (
+            "graph TD\n"
+            "    A[generate_solution] --> B[create_adversarial_tests]\n"
+            "    B --> C[execute_solution]\n"
+            "    C -->|pass| D([END])\n"
+            "    C -->|fail| E[diagnose_failure]\n"
+            "    E --> F[update_learning_log]\n"
+            "    F --> G[increment_iteration]\n"
+            "    G --> A\n"
+        )

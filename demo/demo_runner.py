@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import AsyncGenerator, Generator
 
+from agent.config import AgentConfig
 from agent.graph import stream_agent
 from framework.streaming import (
     format_event_for_timeline,
@@ -95,11 +96,18 @@ class DemoUIState:
 async def run_demo_async(
     task_description: str,
     router: LLMRouter | None = None,
+    config: AgentConfig | None = None,
 ) -> AsyncGenerator[tuple[str, str, str], None]:
     """
     Async generator that yields (timeline, code, learning_log) tuples.
 
     Each yield updates all three Gradio components simultaneously.
+
+    Args:
+        task_description: The user's task string.
+        router: Optional pre-constructed LLMRouter.
+        config: AgentConfig controlling which features are active (Fix 19).
+                Defaults to AgentConfig.development().
     """
     if not task_description or not task_description.strip():
         yield ("No task provided.", "# No task.", ""), False
@@ -117,6 +125,7 @@ async def run_demo_async(
             task_description=task_description.strip(),
             max_iterations=_MAX_DEMO_ITERATIONS,
             router=router,
+            config=config,
         ):
             if event is None:
                 break
@@ -153,16 +162,22 @@ async def run_demo_async(
 def run_demo_sync(
     task_description: str,
     router: LLMRouter | None = None,
+    config: AgentConfig | None = None,
 ) -> Generator[tuple[str, str, str], None, None]:
     """
     Synchronous generator wrapper for Gradio's streaming interface.
 
     Gradio's gr.Interface with streaming expects a regular generator.
     This bridges the async generator to the synchronous Gradio API.
+
+    Args:
+        task_description: The user's task string.
+        router: Optional pre-constructed LLMRouter.
+        config: AgentConfig preset to use (Fix 19). Defaults to development().
     """
     async def _collect():
         results = []
-        async for update in run_demo_async(task_description, router=router):
+        async for update in run_demo_async(task_description, router=router, config=config):
             results.append(update)
         return results
 

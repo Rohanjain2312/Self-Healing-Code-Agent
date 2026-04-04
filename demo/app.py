@@ -33,6 +33,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 import gradio as gr
 
+from agent.config import AgentConfig
+from agent.graph import get_graph_mermaid
 from demo.demo_runner import EXAMPLE_TASKS, run_demo_sync
 from evaluation.metrics import load_results
 
@@ -154,8 +156,37 @@ def _build_performance_components():
 # Gradio UI construction
 # ---------------------------------------------------------------------------
 
-def build_app() -> gr.Blocks:
+def _mermaid_html(diagram: str) -> str:
+    """Render a Mermaid diagram string as an HTML snippet using Mermaid.js CDN."""
+    # Escape backticks and backslashes that would break the JS template literal
+    safe_diagram = diagram.replace("\\", "\\\\").replace("`", "\\`")
+    return f"""
+<div id="mermaid-container" style="background:#1e1e2e;border-radius:8px;padding:16px;overflow:auto;max-height:420px;">
+  <div class="mermaid" style="text-align:center;">{diagram}</div>
+</div>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});
+</script>
+"""
+
+
+def build_app(config: AgentConfig | None = None) -> gr.Blocks:
+    """
+    Build the Gradio application.
+
+    Args:
+        config: AgentConfig preset to use as the default for the live agent tab.
+                Defaults to AgentConfig.development(). The UI also lets users
+                switch presets interactively (Fix 19).
+    """
+    if config is None:
+        config = AgentConfig.development()
+
     summary_text, cat_fig, iter_fig = _build_performance_components()
+
+    # Pre-generate graph diagram for the default config (Fix 18)
+    default_mermaid = get_graph_mermaid(config=AgentConfig.development())
 
     css = """
     .timeline-box { font-family: monospace; font-size: 0.85rem; }
@@ -175,8 +206,30 @@ diagnoses failures, and repairs solutions through structured iteration.
             """
         )
 
-        # ---- Tab 1: Run Live Agent ----
+        # ── Tab 1: Run Live Agent ────────────────────────────────────────────
         with gr.Tab("Run Live Agent"):
+
+            # ── Fix 19: Preset selector ──────────────────────────────────────
+            with gr.Accordion("Agent Configuration", open=False):
+                gr.Markdown(
+                    "Select a preset to configure which features are enabled. "
+                    "Changes take effect on the next **Run Agent** click."
+                )
+                preset_radio = gr.Radio(
+                    choices=["development", "staging", "production"],
+                    value="development",
+                    label="Preset",
+                    info=(
+                        "development = no extra features (fast). "
+                        "staging = critic + spec tests + parallel repair. "
+                        "production = all features + human review before each repair."
+                    ),
+                )
+                with gr.Row(visible=False) as custom_row:
+                    enable_critic_cb = gr.Checkbox(label="Enable Critic", value=False)
+                    enable_spec_cb = gr.Checkbox(label="Enable Spec Tests", value=False)
+                    parallel_cb = gr.Checkbox(label="Parallel Repair Strategies", value=False)
+
             with gr.Row():
                 with gr.Column(scale=2):
                     task_input = gr.Textbox(
@@ -240,8 +293,8 @@ diagnoses failures, and repairs solutions through structured iteration.
                 outputs=[task_input, timeline, code_output, learning_log],
             )
 
-            def _run_streaming(task: str):
-                """Generator function for Gradio streaming."""
+            def _run_streaming(task: str, preset: str):
+                """Generator function for Gradio streaming — respects preset config."""
                 if not task or not task.strip():
                     yield (
                         "Please enter a task description.",
@@ -250,16 +303,57 @@ diagnoses failures, and repairs solutions through structured iteration.
                     )
                     return
 
-                for timeline_text, code_text, lessons_text in run_demo_sync(task):
+                # Resolve AgentConfig from preset name (Fix 19)
+                run_config = getattr(AgentConfig, preset, AgentConfig.development)()
+
+                for timeline_text, code_text, lessons_text in run_demo_sync(
+                    task, config=run_config
+                ):
                     yield timeline_text, code_text, lessons_text
 
             run_btn.click(
                 fn=_run_streaming,
-                inputs=[task_input],
+                inputs=[task_input, preset_radio],
                 outputs=[timeline, code_output, learning_log],
             )
 
-        # ---- Tab 2: Performance ----
+        # ── Tab 2: Graph Topology (Fix 18) ───────────────────────────────────
+        with gr.Tab("Graph Topology"):
+            gr.Markdown(
+                """
+## Agent Graph Topology
+
+The diagram below shows the LangGraph state machine for the **development** preset
+(no optional nodes). Switch presets in Tab 1 to enable additional nodes
+(critic, spec tests, parallel repair strategies).
+                """
+            )
+
+            # Live diagram: update when preset changes
+            graph_html = gr.HTML(
+                value=_mermaid_html(default_mermaid),
+                label="Agent Graph (Mermaid)",
+            )
+
+            mermaid_src = gr.Textbox(
+                label="Mermaid source (copy into mermaid.live to edit)",
+                value=default_mermaid,
+                lines=20,
+                interactive=False,
+            )
+
+            def _update_graph(preset: str):
+                cfg = getattr(AgentConfig, preset, AgentConfig.development)()
+                diagram = get_graph_mermaid(config=cfg)
+                return _mermaid_html(diagram), diagram
+
+            preset_radio.change(
+                fn=_update_graph,
+                inputs=[preset_radio],
+                outputs=[graph_html, mermaid_src],
+            )
+
+        # ── Tab 3: Performance ───────────────────────────────────────────────
         with gr.Tab("Performance"):
             gr.Markdown(
                 """
@@ -297,7 +391,7 @@ Benchmark runs are executed on GPU (Colab) — results loaded from precomputed d
 
 
 def main() -> None:
-    app = build_app()
+    app = build_app(config=AgentConfig.development())
     app.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),

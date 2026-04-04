@@ -44,9 +44,16 @@ def _prewarm() -> None:
 # Pre-warm synchronously — blocks until model is loaded, then launch Gradio
 _prewarm()
 
-from demo.app import build_app  # noqa: E402 — import after path setup
+from agent.config import AgentConfig  # noqa: E402
+from demo.app import build_app       # noqa: E402 — import after path setup
 
-demo = build_app()
+# Fix 19: select config preset from environment variable
+# AGENT_PRESET=development (default) | staging | production
+_preset = os.environ.get("AGENT_PRESET", "development")
+_config = getattr(AgentConfig, _preset, AgentConfig.development)()
+logger.info("Agent preset: %s (%s)", _preset, _config)
+
+demo = build_app(config=_config)
 demo.queue()  # required in Gradio 5 — initializes pending_message_lock before launch
 demo.launch(
     server_name="0.0.0.0",
