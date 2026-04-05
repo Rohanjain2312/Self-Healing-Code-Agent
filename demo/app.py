@@ -34,6 +34,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 import gradio as gr  # noqa: E402
 
 from agent.config import AgentConfig  # noqa: E402
+from llm.router import LLMRouter      # noqa: E402
 from demo.demo_runner import (  # noqa: E402
     EXAMPLE_TASKS,
     AgentSession,
@@ -708,7 +709,7 @@ diagnoses failures, and repairs solutions through structured iteration.
             # HITL review panel — hidden until an interrupt fires
             with gr.Group(visible=False) as review_panel:
                 gr.Markdown("### ⏸ Repair Review — Awaiting Human Decision")
-                review_info = gr.JSON(label="Diagnosis", value=None)
+                gr.JSON(label="Diagnosis", value=None)
                 edited_strategy = gr.Textbox(
                     label="Edit repair strategy (optional — leave blank to approve as-is)",
                     lines=3,
@@ -762,7 +763,6 @@ diagnoses failures, and repairs solutions through structured iteration.
                     if isinstance(item, dict) and item.get("type") == "repair_review":
                         if local_session is not None:
                             local_session.events_seen = item.get("events_seen", 0)
-                        payload = item.get("payload", {})
                         yield (
                             gr.update(),                   # timeline unchanged
                             gr.update(),                   # code unchanged
