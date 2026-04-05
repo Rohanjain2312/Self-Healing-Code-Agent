@@ -34,7 +34,12 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 import gradio as gr  # noqa: E402
 
 from agent.config import AgentConfig  # noqa: E402
-from demo.demo_runner import EXAMPLE_TASKS, run_demo_sync  # noqa: E402
+from demo.demo_runner import (  # noqa: E402
+    EXAMPLE_TASKS,
+    AgentSession,
+    run_demo_async,
+    resume_demo_async,
+)
 from evaluation.metrics import load_results  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -609,12 +614,17 @@ _PRODUCTION_SVG = """
 """
 
 
-def build_app(config: AgentConfig | None = None) -> gr.Blocks:
+def build_app(
+    config: AgentConfig | None = None,
+    router: "LLMRouter | None" = None,
+) -> gr.Blocks:
     """
     Build the Gradio application.
 
     Args:
         config: AgentConfig to use. Defaults to AgentConfig() (production defaults).
+        router: Optional pre-built LLMRouter. If None, run_demo_async builds one
+                via build_router_with_generator_override() on first call.
     """
     if config is None:
         config = AgentConfig()
@@ -641,6 +651,9 @@ diagnoses failures, and repairs solutions through structured iteration.
 
         # ── Tab 1: Run Live Agent ────────────────────────────────────────────
         with gr.Tab("Run Live Agent"):
+
+            # Holds the live graph + thread config between HITL pause and resume
+            agent_session_state = gr.State(value=None)
 
             with gr.Row():
                 with gr.Column(scale=2):
@@ -692,38 +705,127 @@ diagnoses failures, and repairs solutions through structured iteration.
                         value="# Code will appear here during agent execution.",
                     )
 
+            # HITL review panel — hidden until an interrupt fires
+            with gr.Group(visible=False) as review_panel:
+                gr.Markdown("### ⏸ Repair Review — Awaiting Human Decision")
+                review_info = gr.JSON(label="Diagnosis", value=None)
+                edited_strategy = gr.Textbox(
+                    label="Edit repair strategy (optional — leave blank to approve as-is)",
+                    lines=3,
+                    placeholder="Leave blank to approve the diagnosis unchanged...",
+                )
+                with gr.Row():
+                    approve_btn = gr.Button("Approve", variant="primary")
+                    abort_btn = gr.Button("Abort", variant="stop")
+
             def _clear():
                 return (
                     "",
                     "Enter a task and click Run Agent.",
                     "# Code will appear here during agent execution.",
                     "No lessons recorded yet.",
+                    gr.update(visible=False),
+                    None,
                 )
 
             clear_btn.click(
                 fn=_clear,
-                outputs=[task_input, timeline, code_output, learning_log],
+                outputs=[task_input, timeline, code_output, learning_log,
+                         review_panel, agent_session_state],
             )
 
-            def _run_streaming(task: str):
-                """Generator function for Gradio streaming."""
+            async def _run_streaming(task: str, session):
+                """Async generator for Gradio streaming with HITL support."""
                 if not task or not task.strip():
                     yield (
                         "Please enter a task description.",
                         "# No task provided.",
                         "No lessons recorded yet.",
+                        gr.update(visible=False),
+                        None,
                     )
                     return
 
-                for timeline_text, code_text, lessons_text in run_demo_sync(
-                    task, config=config
-                ):
-                    yield timeline_text, code_text, lessons_text
+                local_session = None
+
+                async for item in run_demo_async(task, config=config, router=router):
+                    # Session handshake — store the live graph reference
+                    if isinstance(item, dict) and item.get("type") == "session":
+                        local_session = AgentSession(
+                            app=item["app"],
+                            thread_config=item["thread_config"],
+                            events_seen=0,
+                        )
+                        continue
+
+                    # Interrupt event — show review panel and stop streaming
+                    if isinstance(item, dict) and item.get("type") == "repair_review":
+                        if local_session is not None:
+                            local_session.events_seen = item.get("events_seen", 0)
+                        payload = item.get("payload", {})
+                        yield (
+                            gr.update(),                   # timeline unchanged
+                            gr.update(),                   # code unchanged
+                            gr.update(),                   # lessons unchanged
+                            gr.update(visible=True),       # show review panel
+                            local_session,
+                        )
+                        return  # stop generator, wait for user button click
+
+                    # Normal UI tuple (timeline, code, lessons)
+                    if isinstance(item, tuple) and len(item) == 3:
+                        timeline_text, code_text, lessons_text = item
+                        yield (
+                            timeline_text,
+                            code_text,
+                            lessons_text,
+                            gr.update(visible=False),
+                            local_session,
+                        )
 
             run_btn.click(
                 fn=_run_streaming,
-                inputs=[task_input],
-                outputs=[timeline, code_output, learning_log],
+                inputs=[task_input, agent_session_state],
+                outputs=[timeline, code_output, learning_log,
+                         review_panel, agent_session_state],
+            )
+
+            async def _approve_repair(edited: str, session):
+                """Resume graph after human approves (optionally editing strategy)."""
+                if session is None:
+                    yield (gr.update(), gr.update(), gr.update(), gr.update(visible=False))
+                    return
+                decision = (
+                    {"action": "edit", "edited_strategy": edited}
+                    if edited and edited.strip()
+                    else {"action": "approve"}
+                )
+                async for timeline_t, code_t, lessons_t in resume_demo_async(
+                    session, decision, router=router, config=config
+                ):
+                    yield (timeline_t, code_t, lessons_t, gr.update(visible=False))
+
+            approve_btn.click(
+                fn=_approve_repair,
+                inputs=[edited_strategy, agent_session_state],
+                outputs=[timeline, code_output, learning_log, review_panel],
+            )
+
+            async def _abort_repair(session):
+                """Resume graph with abort decision."""
+                if session is None:
+                    yield (gr.update(), gr.update(), gr.update(), gr.update(visible=False))
+                    return
+                decision = {"action": "abort"}
+                async for timeline_t, code_t, lessons_t in resume_demo_async(
+                    session, decision, router=router, config=config
+                ):
+                    yield (timeline_t, code_t, lessons_t, gr.update(visible=False))
+
+            abort_btn.click(
+                fn=_abort_repair,
+                inputs=[agent_session_state],
+                outputs=[timeline, code_output, learning_log, review_panel],
             )
 
         # ── Tab 2: Graph Topology ─────────────────────────────────────────────

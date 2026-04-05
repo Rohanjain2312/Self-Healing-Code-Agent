@@ -7,6 +7,13 @@ that Gradio can consume via its generator-based streaming API.
 The runner maintains UI state locally and yields (timeline, code, log) tuples
 after each event so Gradio can update all three components atomically.
 
+HITL support:
+  When autonomy_level != "full_auto", the graph pauses at interrupt() for human
+  review. run_demo_async() yields a session dict on startup (so the UI can hold
+  the live graph reference) and a repair_review dict on interrupt (so the UI
+  can show the review panel). resume_demo_async() resumes the graph with the
+  human decision and continues streaming.
+
 HF Spaces constraints respected:
   - max_iterations capped at 4 to limit inference time
   - No benchmark execution in demo mode
@@ -15,16 +22,18 @@ HF Spaces constraints respected:
 
 import asyncio
 import logging
-from typing import AsyncGenerator, Generator
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Generator
 
 from agent.config import AgentConfig
-from agent.graph import stream_agent
+from agent.graph import build_graph, _make_initial_state
 from framework.streaming import (
     format_event_for_timeline,
     PUBLIC_EVENT_TYPES,
 )
 from agent.events import SUCCESS, CODE_GENERATED, LEARNING_UPDATE, REPAIR_REVIEW
-from llm.router import LLMRouter
+from llm.router import LLMRouter, build_router_with_generator_override
 
 logger = logging.getLogger(__name__)
 
@@ -33,143 +42,88 @@ _MAX_DEMO_ITERATIONS = 4
 
 # Example tasks shown in the demo UI
 EXAMPLE_TASKS = [
-    # Problem 1: LRU Cache with frequency-based tie-breaking
-    # Hard because: model knows LRU but not this specific tie-breaking rule.
-    # Fails on: eviction when multiple keys have same frequency — wrong key evicted.
-    """Implement a class `LFUCache` with `get(key)` and `put(key, value)` methods.
-It must have O(1) average time complexity for both operations.
+    # Task 1 (from benchmark): Merge overlapping intervals
+    # Common 3b failure: uses > instead of >= so touching intervals [1,3],[3,5] don't merge
+    """Write a Python function `merge_intervals(intervals: list[list[int]]) -> list[list[int]]`
+that merges all overlapping intervals and returns a sorted list of non-overlapping intervals.
 
-Eviction rules (strictly in this order):
-1. Evict the key with the LOWEST access frequency (get + put count both increment frequency).
-2. If multiple keys share the lowest frequency, evict the one that was LEAST RECENTLY USED among them.
-3. put() on an existing key updates its value AND increments its frequency.
-4. put() on a new key when at capacity must evict before inserting. The new key starts with frequency 1.
-
-Example:
-cache = LFUCache(2)
-cache.put(1, 1)   # cache: {1: freq=1}
-cache.put(2, 2)   # cache: {1: freq=1, 2: freq=1}
-cache.get(1)      # returns 1, cache: {1: freq=2, 2: freq=1}
-cache.put(3, 3)   # evicts key 2 (lowest freq=1), cache: {1: freq=2, 3: freq=1}
-cache.get(2)      # returns -1 (not found)
-cache.get(3)      # returns 3
-cache.put(4, 4)   # evicts key 3 (lowest freq=1, LRU among freq=1 keys), cache: {1: freq=2, 4: freq=1}
-cache.get(3)      # returns -1
-cache.get(4)      # returns 4
-cache.get(1)      # returns 1
-
-Additional constraints:
-- get() on a missing key returns -1 and does NOT affect any frequencies.
-- A cache with capacity 0 always returns -1 on get() and silently ignores put().
-- All keys and values are non-negative integers.""",
-
-    # Problem 2: Expression evaluator with operator precedence and left-associativity
-    # Hard because: model typically uses a stack but gets precedence or left-associativity wrong.
-    # Fails on: chained same-precedence operators (8/2/2 should be 2 not 8), unary minus edge cases.
-    """Write a function `evaluate(expression: str) -> float` that evaluates a mathematical
-expression string containing:
-- Non-negative integers and decimals (e.g. 3, 3.14)
-- Operators: +, -, *, / (true division, not floor)
-- Unary minus (e.g. -3 * 2, -(4+5))
-- Parentheses for grouping (arbitrarily nested)
-- Spaces anywhere between tokens (ignore all whitespace)
-
-Operator precedence (high to low): *, / then +, -
-All operators are LEFT-ASSOCIATIVE:
-  8 / 2 / 2  →  (8 / 2) / 2  →  2.0   (NOT 8 / (2/2) = 8.0)
-  10 - 3 - 2  →  (10 - 3) - 2  →  5.0
-
-Edge cases your implementation must handle:
-- Unary minus before parentheses: -(3 + 4) → -7.0
-- Unary minus before a number: -3 + 5 → 2.0
-- Chained unary: --3 → 3.0
-- Expression starting with unary minus: -3 * -2 → 6.0
-- Division always returns float: 7 / 2 → 3.5
-- Single number: "42" → 42.0, "-42" → -42.0
-
-Do NOT use Python's eval() or ast.literal_eval().
-Do NOT import any external libraries.
+Requirements:
+- Input: list of [start, end] integer pairs. May be unsorted.
+- Output: merged, sorted list of [start, end] pairs.
+- Empty input returns [].
+- Single interval returned unchanged.
+- Intervals are inclusive: [1,3] and [3,5] must merge to [1,5].
+- Do not modify the input list.
 
 Examples:
-evaluate("3 + 4 * 2")       → 11.0
-evaluate("(3 + 4) * 2")     → 14.0
-evaluate("8 / 2 / 2")       → 2.0
-evaluate("-3 * -2")         → 6.0
-evaluate("-(3 + 4)")        → -7.0
-evaluate("10 - 3 - 2")      → 5.0
-evaluate("3.5 * 2")         → 7.0""",
+merge_intervals([]) == []
+merge_intervals([[1,3],[2,6],[8,10]]) == [[1,6],[8,10]]
+merge_intervals([[1,3],[3,5]]) == [[1,5]]
+merge_intervals([[3,4],[1,2]]) == [[1,2],[3,4]]""",
 
-    # Problem 3: Alien dictionary topological sort with specific error handling
-    # Hard because: model gets basic topo sort right but fails on cycle detection,
-    # missing characters, or single-word edge cases.
-    # Fails on: words where a prefix word appears AFTER the longer word (invalid ordering).
-    """Write a function `alien_order(words: list[str]) -> str` that determines the
-character ordering of an alien alphabet given a sorted list of words in that alien language.
+    # Task 2 (from benchmark): Flatten nested lists
+    # Common 3b failure: iterates into string characters instead of treating strings as scalars
+    """Write a Python function `flatten(nested)` that recursively flattens nested lists
+and tuples into a flat list.
 
-Rules:
-- Return a string of all unique characters in the alien alphabet in a valid topological order.
-- If multiple valid orderings exist, return the LEXICOGRAPHICALLY SMALLEST valid ordering.
-- If the ordering is CONTRADICTORY (contains a cycle), return "" (empty string).
-- If a longer word appears before its prefix (e.g. ["abc", "ab"]), this is INVALID — return "".
-- Characters that appear in the word list but have NO ordering constraints relative to others
-  must still be included in the output.
-- If the input has only one word, return its unique characters in lexicographically sorted order.
+Requirements:
+- Flatten arbitrarily deep nesting of lists and tuples.
+- Strings are scalars — do NOT iterate their characters.
+- None is a scalar — preserve it in output.
+- Empty lists/tuples contribute nothing.
+- A non-container scalar input returns [scalar].
 
 Examples:
-alien_order(["wrt", "wrf", "er", "ett", "rftt"])  → "wertf"
-alien_order(["z", "x"])                            → "zx"
-alien_order(["z", "x", "z"])                       → ""  (cycle: z→x→z)
-alien_order(["abc", "ab"])                          → ""  (prefix after longer word)
-alien_order(["abc"])                                → "abc"
-alien_order(["z", "z"])                             → "z"  (duplicate, no info)
-alien_order(["ac", "ab", "zc", "zb"])              → "azbc" or valid topo with lex smallest first
+flatten([1,[2,[3]],4]) == [1,2,3,4]
+flatten(["hello",["world"]]) == ["hello","world"]
+flatten([1,None,2]) == [1,None,2]
+flatten((1,(2,3))) == [1,2,3]
+flatten(42) == [42]""",
 
-Implementation requirements:
-- Use a min-heap or equivalent to always pick the lexicographically smallest available character.
-- Do not use any topological sort library — implement from scratch using adjacency list + in-degree tracking.""",
+    # Task 3 (fresh): Deduplicate preserving insertion order
+    # Common 3b failure: uses set() which destroys order
+    """Write a Python function `deduplicate(items: list[str]) -> list[str]`
+that removes duplicate strings while preserving the order of first occurrence.
 
-    # Problem 4: Run-length encoding with a very specific output format
-    # Hard because: model knows RLE but gets the format wrong for runs of length 1,
-    # or fails on unicode/mixed characters, or gets the decode round-trip wrong.
-    # Fails on: single characters (should not emit "1x"), consecutive same chars across boundaries.
-    """Write two functions:
-
-1. `rle_encode(s: str) -> str`
-   Run-length encode a string using this EXACT format:
-   - A run of N identical characters is encoded as: the character followed by N (e.g. "a3")
-   - EXCEPTION: a run of exactly 1 character is encoded as just the character with NO number (e.g. "a" not "a1")
-   - The encoded string must be strictly shorter than or equal to the original for it to be worth encoding.
-     If encoding would make it longer, return the original string unchanged prefixed with "RAW:" (e.g. "RAW:abc")
-   - Empty string encodes to empty string.
-
-2. `rle_decode(s: str) -> str`
-   Decode a string produced by rle_encode():
-   - If the string starts with "RAW:", strip the prefix and return the rest unchanged.
-   - Otherwise parse character-then-optional-digits pairs and expand them.
-   - Must be a perfect inverse of rle_encode() for all inputs.
+Requirements:
+- Comparison is case-sensitive.
+- Strip trailing whitespace before comparing and before storing.
+- Return empty list for empty input.
+- Do not modify the input list.
 
 Examples:
-rle_encode("aabbbcccc")    → "a2b3c4"
-rle_encode("abcd")         → "RAW:abcd"   (encoding "a1b1c1d1" would be longer... wait no:
-                                            "abcd" encodes to "abcd" since each run=1, no digits,
-                                            so encoded = "abcd" same length → return "RAW:abcd"
-                                            because NOT strictly shorter)
-rle_encode("aaabcd")       → "RAW:aaabcd" (encodes to "a3bcd" which IS shorter → return "a3bcd")
-rle_encode("")             → ""
-rle_encode("aaaa")         → "a4"
-rle_encode("aabb")         → "RAW:aabb"   (encodes to "a2b2" same length → not shorter → RAW)
+deduplicate([]) == []
+deduplicate(["a","b","a"]) == ["a","b"]
+deduplicate(["a  ","a"]) == ["a"]
+deduplicate(["z","a","z","b"]) == ["z","a","b"]""",
 
-rle_decode("a2b3c4")       → "aabbbcccc"
-rle_decode("RAW:abcd")     → "abcd"
-rle_decode("a3bcd")        → "aaabcd"
-rle_decode("a4")           → "aaaa"
-rle_decode("")             → ""
+    # Task 4 (fresh): Safe dict get with optional type casting
+    # Common 3b failure: doesn't handle None values or casting exceptions
+    """Write a Python function `safe_get(d: dict, key: str, default, cast_type=None)`.
 
-Additional constraints:
-- Input strings may contain any printable ASCII character including digits, spaces, punctuation.
-- rle_decode(rle_encode(s)) == s must hold for ALL strings s.
-- rle_encode(rle_decode(t)) == t must hold for all valid encoded strings t.""",
+Behaviour:
+- Return d[key] if key exists and value is not None.
+- Return default if key is missing or value is None.
+- If cast_type is provided, attempt cast_type(value). On any exception return default.
+- Never raise any exception regardless of inputs.
+
+Examples:
+safe_get({"a": 1}, "a", 0) == 1
+safe_get({"a": None}, "a", 0) == 0
+safe_get({}, "a", 0) == 0
+safe_get({"a": "42"}, "a", 0, int) == 42
+safe_get({"a": "bad"}, "a", 0, int) == 0
+safe_get({"a": 1}, "a", 0, str) == "1"
+safe_get(None, "a", 0) == 0""",
 ]
+
+
+@dataclass
+class AgentSession:
+    """Holds the live graph and thread config between HITL pause and resume."""
+    app: Any          # compiled LangGraph graph
+    thread_config: dict
+    events_seen: int = field(default=0)  # total events seen so far for de-duplication
 
 
 class DemoUIState:
@@ -181,13 +135,19 @@ class DemoUIState:
         self.learning_lessons: list[str] = []
         self.is_complete: bool = False
         self.final_status: str = ""
+        self._last_iteration: int = 0
 
     def apply_event(self, event: dict) -> None:
         event_type = event.get("type", "")
 
+        # Track current iteration from any event that carries it
+        if "iteration" in event:
+            self._last_iteration = event["iteration"]
+
         if event_type in PUBLIC_EVENT_TYPES:
             line = format_event_for_timeline(event)
-            self.timeline_lines.append(line)
+            if line:
+                self.timeline_lines.append(line)
 
         if event_type == CODE_GENERATED:
             self.current_code = event.get("payload", {}).get("code", self.current_code)
@@ -200,15 +160,14 @@ class DemoUIState:
             self.final_status = "success"
 
         if event_type == REPAIR_REVIEW:
-            # HITL pause — surface the interrupt payload in the timeline.
-            # Full interrupt/resume flow is handled by the async demo when
-            # autonomy_level != "full_auto".
             payload = event.get("payload", {})
-            self.timeline_lines.append(
-                f"[HITL] Repair review requested — "
-                f"category={payload.get('failure_category', '?')} "
-                f"confidence={payload.get('confidence', 0):.0%}"
+            category = payload.get("failure_category", "?")
+            confidence = payload.get("confidence", 0)
+            line = (
+                f"[iter {self._last_iteration}] ⏸  Human review — "
+                f"[{category}] confidence {confidence:.0%}"
             )
+            self.timeline_lines.append(line)
 
     def timeline_text(self) -> str:
         return "\n".join(self.timeline_lines) if self.timeline_lines else "Waiting for agent..."
@@ -226,66 +185,159 @@ async def run_demo_async(
     task_description: str,
     router: LLMRouter | None = None,
     config: AgentConfig | None = None,
-) -> AsyncGenerator[tuple[str, str, str], None]:
+) -> AsyncGenerator[Any, None]:
     """
-    Async generator that yields (timeline, code, learning_log) tuples.
+    Async generator that yields:
+      - {"type": "session", "app": ..., "thread_config": ...} first (so UI can hold session)
+      - (timeline, code, learning_log) tuples on each event
+      - {"type": "repair_review", "payload": ..., "iteration": ...} on HITL pause (then stops)
 
-    Each yield updates all three Gradio components simultaneously.
+    The generator stops (does NOT close the graph) when an interrupt is encountered.
+    Call resume_demo_async() with the AgentSession to continue.
 
     Args:
         task_description: The user's task string.
         router: Optional pre-constructed LLMRouter.
-        config: AgentConfig controlling which features are active (Fix 19).
-                Defaults to AgentConfig.development().
+        config: AgentConfig controlling which features are active.
     """
     if not task_description or not task_description.strip():
-        yield ("No task provided.", "# No task.", ""), False
+        yield ("No task provided.", "# No task.", "")
         return
 
+    if router is None:
+        router = build_router_with_generator_override()
+    if config is None:
+        config = AgentConfig()
+
+    lesson_store = None
+    if config.enable_cross_session_memory:
+        from agent.memory_store import LessonStore
+        lesson_store = LessonStore(config.memory_persist_dir)
+
+    app = build_graph(router=router, config=config, lesson_store=lesson_store)
+    initial_state = _make_initial_state(task_description, _MAX_DEMO_ITERATIONS)
+    thread_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+
+    # Yield session event first so the UI can store the session for HITL resume
+    yield {"type": "session", "app": app, "thread_config": thread_config}
+
     state = DemoUIState()
-    yield (
-        "Agent starting...",
-        "# Initializing...",
-        "No lessons yet.",
-    )
+    yield ("Agent starting...", "# Initializing...", "No lessons yet.")
+
+    # total_seen tracks position in the cumulative events list returned by each node.
+    # Nodes read state["events"] and append new items, returning the full list.
+    # We use total_seen to extract only the genuinely new events each time.
+    total_seen = 0
 
     try:
-        async for event in stream_agent(
-            task_description=task_description.strip(),
-            max_iterations=_MAX_DEMO_ITERATIONS,
-            router=router,
-            config=config,
-        ):
-            if event is None:
-                break
-            state.apply_event(event)
-            yield (
-                state.timeline_text(),
-                state.code_text(),
-                state.lessons_text(),
-            )
+        async for state_update in app.astream(initial_state, thread_config):
+            for node_name, node_state in state_update.items():
+                if not isinstance(node_state, dict):
+                    continue
+                events = node_state.get("events", [])
+                new_events = events[total_seen:]
+                total_seen = len(events)
+                for event in new_events:
+                    if isinstance(event, dict):
+                        state.apply_event(event)
+                        yield (state.timeline_text(), state.code_text(), state.lessons_text())
+
+            # Check for interrupt after processing each graph step
+            current = app.get_state(thread_config)
+            if current.next:
+                try:
+                    payload = current.tasks[0].interrupts[0].value
+                except (IndexError, AttributeError):
+                    payload = {}
+                yield {
+                    "type": "repair_review",
+                    "payload": payload,
+                    "iteration": state._last_iteration,
+                    "events_seen": total_seen,
+                }
+                return  # Stop; wait for human decision via resume_demo_async()
 
     except Exception as exc:
         logger.error("Demo runner error: %s", exc, exc_info=True)
         state.timeline_lines.append(f"[ERROR] {type(exc).__name__}: {exc}")
-        yield (
-            state.timeline_text(),
-            state.code_text(),
-            state.lessons_text(),
-        )
+        yield (state.timeline_text(), state.code_text(), state.lessons_text())
         return
 
-    # Final update
+    # Final update on normal completion
     if state.is_complete:
         state.timeline_lines.append("Agent completed successfully.")
     else:
         state.timeline_lines.append("Agent reached maximum iterations.")
 
-    yield (
-        state.timeline_text(),
-        state.code_text(),
-        state.lessons_text(),
-    )
+    yield (state.timeline_text(), state.code_text(), state.lessons_text())
+
+
+async def resume_demo_async(
+    session: AgentSession,
+    decision: dict,
+    router: LLMRouter | None = None,
+    config: AgentConfig | None = None,
+) -> AsyncGenerator[tuple[str, str, str], None]:
+    """
+    Resume a paused agent graph after a HITL decision and continue streaming.
+
+    Args:
+        session: AgentSession holding the live graph and thread config.
+        decision: Human decision dict, e.g. {"action": "approve"},
+                  {"action": "edit", "edited_strategy": "..."} or {"action": "abort"}.
+        router: Optional LLMRouter (unused here, reserved for future use).
+        config: Optional AgentConfig (unused here, reserved for future use).
+    """
+    from langgraph.types import Command
+
+    app = session.app
+    thread_config = session.thread_config
+    state = DemoUIState()
+    total_seen = session.events_seen
+
+    try:
+        async for state_update in app.astream(Command(resume=decision), thread_config):
+            for node_name, node_state in state_update.items():
+                if not isinstance(node_state, dict):
+                    continue
+                events = node_state.get("events", [])
+                new_events = events[total_seen:]
+                total_seen = len(events)
+                for event in new_events:
+                    if isinstance(event, dict):
+                        state.apply_event(event)
+                        yield (state.timeline_text(), state.code_text(), state.lessons_text())
+
+            # Check for another interrupt
+            current = app.get_state(thread_config)
+            if current.next:
+                try:
+                    payload = current.tasks[0].interrupts[0].value
+                except (IndexError, AttributeError):
+                    payload = {}
+                interrupt_event = {
+                    "type": "repair_review",
+                    "payload": payload,
+                    "iteration": state._last_iteration,
+                    "events_seen": total_seen,
+                }
+                state.apply_event(interrupt_event)
+                yield (state.timeline_text(), state.code_text(), state.lessons_text())
+                return  # Stop and wait for next human decision
+
+    except Exception as exc:
+        logger.error("Resume error: %s", exc, exc_info=True)
+        state.timeline_lines.append(f"[ERROR] {type(exc).__name__}: {exc}")
+        yield (state.timeline_text(), state.code_text(), state.lessons_text())
+        return
+
+    # Final update on normal completion
+    if state.is_complete:
+        state.timeline_lines.append("Agent completed successfully.")
+    else:
+        state.timeline_lines.append("Agent reached maximum iterations.")
+
+    yield (state.timeline_text(), state.code_text(), state.lessons_text())
 
 
 def run_demo_sync(
@@ -296,18 +348,26 @@ def run_demo_sync(
     """
     Synchronous generator wrapper for Gradio's streaming interface.
 
-    Gradio's gr.Interface with streaming expects a regular generator.
-    This bridges the async generator to the synchronous Gradio API.
+    Only supports autonomy_level='full_auto'. For HITL (review_repairs / review_all),
+    use the async Gradio path with run_demo_async() and resume_demo_async().
 
     Args:
         task_description: The user's task string.
         router: Optional pre-constructed LLMRouter.
-        config: AgentConfig preset to use (Fix 19). Defaults to development().
+        config: AgentConfig preset to use. Defaults to AgentConfig().
     """
+    if config and config.autonomy_level != "full_auto":
+        raise NotImplementedError(
+            "run_demo_sync() only supports autonomy_level='full_auto'. "
+            "Use run_demo_async() with the async Gradio path for HITL."
+        )
+
     async def _collect():
         results = []
         async for update in run_demo_async(task_description, router=router, config=config):
-            results.append(update)
+            # Skip session/interrupt dict events — only collect UI tuples
+            if isinstance(update, tuple):
+                results.append(update)
         return results
 
     # asyncio.run() always creates and tears down its own event loop.

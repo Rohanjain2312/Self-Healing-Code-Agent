@@ -20,31 +20,29 @@ logger = logging.getLogger(__name__)
 
 
 def _prewarm() -> None:
-    """Load model weights into memory before Gradio starts accepting requests.
+    """Load generator model weights into memory before Gradio starts accepting requests.
 
-    Runs synchronously so the model is fully loaded before launch().
-    API providers (Anthropic) and Ollama do not need pre-warming — skip them.
-    Only pre-warm HuggingFace Transformers (local model load takes minutes).
-
-    If ANTHROPIC_API_KEY is set, set LLM_PROVIDER=anthropic explicitly in
-    your HF Space variables to skip HuggingFace model loading entirely.
+    Only pre-warm when LLM_PROVIDER=huggingface (generator role). Claude (Anthropic)
+    and Ollama do not load local model weights — skip pre-warming for them.
     """
-    # API providers don't load model weights locally — skip pre-warm entirely
     llm_provider = os.environ.get("LLM_PROVIDER", "").lower()
-    if llm_provider == "anthropic" or os.environ.get("ANTHROPIC_API_KEY"):
-        logger.info("Anthropic API provider detected — skipping pre-warm.")
+    if llm_provider != "huggingface":
+        logger.info("Generator provider is not HuggingFace — skipping pre-warm.")
         return
 
     try:
-        from llm.router import LLMRouter
-        router = LLMRouter()
-        if hasattr(router.provider, "_ensure_loaded"):
-            logger.info("Pre-warming model: %s ...", router.provider.model_name)
-            asyncio.run(router.provider._ensure_loaded())
-            logger.info("Model pre-warm complete: %s", router.provider.model_name)
+        from llm.router import build_router_with_generator_override
+        router = build_router_with_generator_override()
+        # Only pre-warm the generator provider (HuggingFace); Claude never needs it.
+        generator_provider = router._role_providers.get("generator") or router.provider
+        if hasattr(generator_provider, "_ensure_loaded"):
+            logger.info("Pre-warming generator model: %s ...", generator_provider.model_name)
+            asyncio.run(generator_provider._ensure_loaded())
+            logger.info("Model pre-warm complete: %s", generator_provider.model_name)
         else:
             logger.info(
-                "Provider '%s' does not need pre-warming.", router.provider.provider_name
+                "Generator provider '%s' does not need pre-warming.",
+                generator_provider.provider_name,
             )
     except Exception as exc:  # pre-warm is best-effort; never crash the server
         logger.warning("Pre-warm failed (non-fatal): %s", exc)
@@ -53,16 +51,16 @@ def _prewarm() -> None:
 # Pre-warm synchronously — blocks until model is loaded, then launch Gradio
 _prewarm()
 
-from agent.config import AgentConfig  # noqa: E402
-from demo.app import build_app       # noqa: E402 — import after path setup
+from agent.config import AgentConfig                    # noqa: E402
+from demo.app import build_app                          # noqa: E402 — import after path setup
+from llm.router import build_router_with_generator_override  # noqa: E402
 
-# All defaults are production-grade — no preset selection needed.
-# If ANTHROPIC_API_KEY is set, the router auto-selects Claude API.
-# Set LLM_PROVIDER=anthropic explicitly to skip HuggingFace model loading.
 _config = AgentConfig()
 logger.info("Agent config: %s", _config)
 
-demo = build_app(config=_config)
+_router = build_router_with_generator_override()
+
+demo = build_app(config=_config, router=_router)
 demo.queue()  # required in Gradio 5 — initializes pending_message_lock before launch
 demo.launch(
     server_name="0.0.0.0",

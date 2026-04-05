@@ -49,84 +49,85 @@ PUBLIC_EVENT_TYPES = {
 }
 
 
+def _trunc(s: str, n: int) -> str:
+    """Return s truncated to n chars with ellipsis if needed."""
+    return s if len(s) <= n else s[:n - 1] + "\u2026"
+
+
 def format_event_for_timeline(event: dict[str, Any]) -> str:
     """
-    Convert a single event dict to a human-readable timeline entry.
+    Convert a single event dict to a concise human-readable timeline entry.
 
-    Does NOT expose internal reasoning or prompts.
-    Only structured decisions and observable outcomes are shown.
+    Returns "" for event types that should be suppressed (STEP, unknown).
+    All lines are capped at 100 characters.
     """
     event_type = event.get("type", "unknown")
-    message = event.get("message", "")
     iteration = event.get("iteration", 0)
     payload = event.get("payload", {})
 
-    prefix = f"[Iteration {iteration}]"
+    n = iteration  # short alias for f-strings
 
     if event_type == STEP:
-        return f"{prefix} {message}"
+        return ""  # too noisy — suppress
 
     if event_type == CODE_GENERATED:
-        explanation = payload.get("explanation", "")
-        line = f"{prefix} Code generated."
-        if explanation:
-            line += f" Approach: {explanation}"
-        return line
+        code = payload.get("code", "")
+        return _trunc(f"[iter {n}] \u2713 Code generated ({len(code)} chars)", 100)
 
     if event_type == TESTS_GENERATED:
         count = payload.get("test_count", "?")
-        return f"{prefix} {count} adversarial tests generated."
+        return _trunc(f"[iter {n}] \u2713 {count} adversarial tests ready", 100)
 
     if event_type == SPEC_TESTS_GENERATED:
         count = payload.get("test_count", "?")
-        return f"{prefix} {count} spec-blind oracle tests generated."
-
-    if event_type == REPAIR_REVIEW:
-        category = payload.get("failure_category", "unknown")
-        confidence = payload.get("confidence", 0.0)
-        return f"{prefix} HITL: awaiting human review — [{category}] confidence={confidence:.0%}"
+        return _trunc(f"[iter {n}] \u2713 {count} spec tests ready", 100)
 
     if event_type == FAILURE:
         assertions = payload.get("failed_assertions", [])
-        if assertions:
-            first = assertions[0][:120]
-            return f"{prefix} FAIL — {first}"
-        summary = payload.get("summary", "")[:120]
-        return f"{prefix} FAIL — {summary}"
+        summary = assertions[0] if assertions else payload.get("summary", "")
+        return _trunc(f"[iter {n}] \u2717 {_trunc(summary, 80)}", 100)
 
     if event_type == DIAGNOSIS:
         category = payload.get("failure_category", "unknown")
-        root_cause = payload.get("root_cause", "")[:120]
-        return f"{prefix} Diagnosis: [{category}] {root_cause}"
+        root_cause = payload.get("root_cause", "")
+        return _trunc(f"[iter {n}] \u2192 [{category}] {_trunc(root_cause, 80)}", 100)
 
     if event_type == LEARNING_UPDATE:
         count = len(payload.get("lessons", []))
-        return f"{prefix} Learning log updated ({count} lessons retained)."
+        return _trunc(f"[iter {n}] \U0001f4dd {count} lesson(s) logged", 100)
 
     if event_type == SUCCESS:
-        return f"{prefix} SUCCESS — all tests passed."
+        return f"[iter {n}] \u2713 All tests passed"
 
     if event_type == TOOL_USE:
         tool_name = payload.get("tool_name", "unknown")
-        result_preview = payload.get("result", "")[:80].replace("\n", " ")
-        return f"{prefix} Tool: {tool_name} → {result_preview}"
+        result = payload.get("result", "").replace("\n", " ")
+        return _trunc(f"[iter {n}] \U0001f527 {tool_name}: {_trunc(result, 60)}", 100)
 
     if event_type == CRITIC_REVIEW:
-        verdict = payload.get("verdict", "unknown")
+        verdict = payload.get("verdict", "unknown").upper()
         confidence = payload.get("confidence", 0.0)
         issues = payload.get("issues", [])
-        line = f"{prefix} Critic: {verdict.upper()} (confidence={confidence:.0%})"
+        line = f"[iter {n}] \U0001f50d Critic: {verdict} ({confidence:.0%})"
         if issues:
-            line += f" — {issues[0][:80]}"
-        return line
+            line += f" \u2014 {_trunc(issues[0], 50)}"
+        return _trunc(line, 100)
 
     if event_type == PARALLEL_REPAIR:
         strategy = payload.get("strategy_name", "unknown")
         spec = payload.get("spec_passed", False)
         adv = payload.get("adv_passed", False)
-        return f"{prefix} Parallel[{strategy}]: spec={spec} adv={adv}"
+        return _trunc(f"[iter {n}] \u26a1 [{strategy}] spec={spec} adv={adv}", 100)
 
-    return f"{prefix} {message}"
+    if event_type == REPAIR_REVIEW:
+        category = payload.get("failure_category", "?")
+        confidence = payload.get("confidence", 0.0)
+        return _trunc(
+            f"[iter {n}] \u23f8  Human review \u2014 [{category}] confidence {confidence:.0%}",
+            100,
+        )
+
+    return ""  # suppress unknown event types
 
 
 async def stream_events_for_ui(
@@ -172,8 +173,9 @@ def extract_learning_log(events: list[dict[str, Any]]) -> list[str]:
 
 def build_timeline_text(events: list[dict[str, Any]]) -> str:
     """Convert a full event list to a multi-line timeline string for display."""
-    lines = []
-    for event in events:
-        if event.get("type") in PUBLIC_EVENT_TYPES:
-            lines.append(format_event_for_timeline(event))
-    return "\n".join(lines)
+    lines = [
+        format_event_for_timeline(e)
+        for e in events
+        if e.get("type") in PUBLIC_EVENT_TYPES
+    ]
+    return "\n".join(line for line in lines if line)

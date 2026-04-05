@@ -26,8 +26,7 @@ class AgentConfig:
 
     # ── Autonomy / HITL ───────────────────────────────────────────────────────
     # "full_auto" | "review_repairs" | "review_all"
-    # Keep full_auto as default — interrupt() cannot be used in Gradio on HF Spaces.
-    autonomy_level: str = "full_auto"
+    autonomy_level: str = "review_repairs"
 
     # ── Parallel repair strategies (Fix 14) ───────────────────────────────────
     parallel_strategies: bool = False

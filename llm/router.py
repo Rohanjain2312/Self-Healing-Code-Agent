@@ -378,3 +378,61 @@ class LLMRouter:
     @property
     def provider(self) -> BaseLLMProvider:
         return self._provider
+
+
+def build_router_with_generator_override() -> "LLMRouter":
+    """
+    Build router where generator uses a local weak model, all other roles use Claude.
+
+    Detection order:
+      1. LLM_PROVIDER=huggingface  -> HuggingFaceProvider for generator
+      2. Ollama reachable           -> OllamaProvider for generator
+      3. Neither                    -> default router, all roles use Claude
+    """
+    import os
+
+    try:
+        from .providers.anthropic_provider import AnthropicProvider
+        default_provider = AnthropicProvider()
+    except Exception as exc:
+        logger.warning("AnthropicProvider unavailable, falling back to auto-resolve: %s", exc)
+        default_provider = _resolve_provider()
+
+    env_provider = os.environ.get("LLM_PROVIDER", "").lower()
+
+    # HF Spaces path
+    if env_provider == "huggingface":
+        try:
+            from .providers.hf_provider import HuggingFaceProvider
+            generator_provider = HuggingFaceProvider()
+            logger.info(
+                "Generator role -> HuggingFaceProvider model=%s | Other roles -> %s",
+                generator_provider.model_name, default_provider.provider_name,
+            )
+            return LLMRouter(
+                provider=default_provider,
+                role_providers={"generator": generator_provider},
+            )
+        except Exception as exc:
+            logger.warning("HuggingFaceProvider failed (%s), generator uses default.", exc)
+            return LLMRouter(provider=default_provider)
+
+    # Local MacBook path
+    try:
+        from .providers.ollama_provider import OllamaProvider
+        generator_model = os.environ.get("OLLAMA_GENERATOR_MODEL", "llama3.2:3b")
+        ollama = OllamaProvider(model=generator_model)
+        if ollama.is_available_sync():
+            logger.info(
+                "Generator role -> OllamaProvider model=%s | Other roles -> %s",
+                generator_model, default_provider.provider_name,
+            )
+            return LLMRouter(
+                provider=default_provider,
+                role_providers={"generator": ollama},
+            )
+        logger.info("Ollama not reachable — generator uses default provider.")
+    except Exception as exc:
+        logger.warning("Ollama check failed (%s), generator uses default.", exc)
+
+    return LLMRouter(provider=default_provider)
