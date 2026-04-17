@@ -70,7 +70,7 @@ from framework.streaming import (
     format_event_for_timeline,
     PUBLIC_EVENT_TYPES,
 )
-from agent.events import SUCCESS, CODE_GENERATED, LEARNING_UPDATE, REPAIR_REVIEW
+from agent.events import SUCCESS, CODE_GENERATED, LEARNING_UPDATE
 from llm.router import LLMRouter, build_router_with_generator_override
 
 logger = logging.getLogger(__name__)
