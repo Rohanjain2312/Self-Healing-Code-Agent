@@ -235,16 +235,8 @@ class DemoUIState:
             self.is_complete = True
             self.final_status = "success"
 
-        # REPAIR_REVIEW: the graph paused for HITL — show a pause indicator in timeline
-        if event_type == REPAIR_REVIEW:
-            payload = event.get("payload", {})
-            category = payload.get("failure_category", "?")
-            confidence = payload.get("confidence", 0)
-            line = (
-                f"[iter {self._last_iteration}] ⏸  Human review — "
-                f"[{category}] confidence {confidence:.0%}"
-            )
-            self.timeline_lines.append(line)
+        # REPAIR_REVIEW is already formatted by format_event_for_timeline above.
+        # No duplicate append needed here.
 
     def timeline_text(self) -> str:
         return "\n".join(self.timeline_lines) if self.timeline_lines else "Waiting for agent..."
