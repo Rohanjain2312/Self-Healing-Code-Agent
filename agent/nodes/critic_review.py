@@ -1,22 +1,46 @@
 """
-Critic node — agent self-reflection after tests pass (Fix 15).
+Critic node — agent self-reflection after all tests pass (Fix 15).
 
-When all tests pass, the agent typically declares success immediately.
-This creates a blind spot: the QA-generated tests may not cover all
-edge cases specified in the task, and the code can be algorithmically
-wrong while passing the generated tests.
+ROLE IN THE GRAPH
+-----------------
+critic_review runs AFTER execute_solution when last_execution_passed=True.
+It acts as a second gate before declaring success — it checks whether the
+solution is actually correct or just "tests-pass-but-wrong" correct.
 
-The critic examines the passing code against the original specification
-and flags issues the test suite missed. If confidence > threshold AND
-verdict is "reject", the critic re-opens the repair loop by:
-  - Setting last_execution_passed = False
-  - Injecting critic feedback as root_cause and repair_strategy
+THE PROBLEM IT SOLVES
+----------------------
+Generated tests can be wrong or incomplete. A generator model and a QA model
+can both agree on a wrong interpretation of the spec and write mutually-consistent
+but incorrect code and tests. The critic has INDEPENDENT perspective — it reads
+the original task description and the code without any awareness of what tests
+were generated, and asks: "does this code actually solve the problem correctly?"
 
-Design decision: use call_with_fallback() rather than call() so that
-critic failures never block success. On LLM failure, the fallback
-conservatively approves (avoids infinite repair loops from bad critique).
-Reject decisions require confidence > config.critic_confidence_threshold
-to prevent low-confidence rejections from triggering unnecessary repairs.
+Examples of what the critic catches:
+  - A function that silently returns None for invalid inputs instead of raising
+    the specified exception.
+  - Off-by-one errors that the edge-case tests happened not to cover.
+  - Sorting a list in-place when the spec says "return a sorted copy".
+  - Returning the wrong data type (e.g. string instead of int).
+
+THE CONFIDENCE THRESHOLD
+------------------------
+Rejecting a passing solution is expensive (wastes an iteration). Low-confidence
+rejections are false positives — the critic wasn't sure but flagged it anyway.
+We only re-open the repair loop when:
+  - verdict == "reject"
+  - confidence > config.critic_confidence_threshold (default: 0.6)
+  - At least one specific issue was listed
+  - The LLM response did NOT use the fallback path
+
+This means the critic errs on the side of approval when uncertain, which is the
+right default for an autonomous agent.
+
+WHY call_with_fallback() NOT call()
+-----------------------------------
+Critic failures must never BLOCK a successful run. If the LLM fails to produce
+a valid review, the fallback conservatively approves the solution. Using call()
+(raises on failure) would turn a passing run into a crash just because the critic
+had a bad day.
 """
 
 import logging
@@ -35,11 +59,19 @@ async def critic_review(
     router: LLMRouter,
     agent_config: AgentConfig,
 ) -> dict[str, Any]:
-    """
-    LangGraph node: final correctness review of passing solutions.
+    """LangGraph node: review a passing solution for correctness issues.
 
-    Returns empty dict (no state change) on approval.
-    On rejection with sufficient confidence, re-opens the repair loop.
+    Args:
+        state:        Current AgentState. Reads: iteration, task_description,
+                      current_code, spec_test_code, current_test_code.
+        router:       LLMRouter. Uses the ``critic`` role → Claude (Haiku 4.5).
+        agent_config: AgentConfig (bound via functools.partial). Used for
+                      critic_confidence_threshold.
+
+    Returns:
+        Empty dict (approved, no state change) if verdict == "approve".
+        State override dict (re-opens repair loop) if verdict == "reject"
+        with high confidence.
     """
     iteration = state.get("iteration", 0)
     events = list(state.get("events", []))
@@ -53,7 +85,9 @@ async def critic_review(
     spec_test_code = state.get("spec_test_code", "")
     adversarial_test_code = state.get("current_test_code", "")
 
-    # Build a summary of what tests were run and passed
+    # Build a human-readable summary of which tests passed — the critic uses
+    # this context to understand what was already verified so it doesn't
+    # re-flag things the tests cover well.
     test_summary_parts = []
     if spec_test_code.strip():
         test_summary_parts.append("Spec-blind oracle tests: PASSED")
@@ -63,6 +97,9 @@ async def critic_review(
         test_summary_parts.append("No formal tests were run (code executed without errors).")
     test_summary = "\n".join(test_summary_parts)
 
+    # call_with_fallback — returns (result, used_fallback). On fallback:
+    # result is {"verdict": "approve", "issues": [], "confidence": 0.5}
+    # so a broken critic always approves conservatively.
     result, used_fallback = await router.call_with_fallback(
         role="critic",
         template_key="review",
@@ -90,12 +127,13 @@ async def critic_review(
         iteration=iteration,
     ).to_dict())
 
+    # Decide whether to re-open the repair loop. All four conditions must hold:
     threshold = agent_config.critic_confidence_threshold
     should_reject = (
         verdict == "reject"
-        and confidence > threshold
-        and issues
-        and not used_fallback
+        and confidence > threshold    # high confidence — not a borderline call
+        and issues                    # at least one specific issue identified
+        and not used_fallback         # don't trust the fallback's output as a rejection
     )
 
     if should_reject:
@@ -103,7 +141,11 @@ async def critic_review(
             "Critic rejected solution (confidence=%.2f > threshold=%.2f) — re-entering repair loop",
             confidence, threshold,
         )
-        issue_text = " | ".join(issues[:3])
+        issue_text = " | ".join(issues[:3])  # include top 3 issues in the repair context
+        # Inject the critic's feedback as the root_cause and repair_strategy so
+        # the generator in the next iteration knows exactly what to fix.
+        # Setting last_execution_passed=False causes _route_after_critic to
+        # return "diagnose_failure", re-entering the repair loop.
         return {
             "last_execution_passed": False,
             "last_failure_summary": f"Critic review failed:\n{issue_text}",
@@ -117,5 +159,7 @@ async def critic_review(
             "events": events,
         }
 
-    # Approved (or low-confidence rejection) — no state change needed
+    # Critic approved (or low-confidence rejection — treat as approval).
+    # Return only events — no other state changes needed. The routing function
+    # will see last_execution_passed=True and route to END.
     return {"events": events}

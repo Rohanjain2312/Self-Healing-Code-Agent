@@ -1,26 +1,49 @@
 """
 Parallel repair strategies with tournament selection (Fix 14).
 
-Instead of trying one repair strategy per iteration serially, this module
-fans out three strategies simultaneously and selects the best result:
+WHAT THIS MODULE DOES
+---------------------
+When ``config.parallel_strategies=True``, instead of applying one repair
+strategy per iteration serially, this module fans out THREE strategies
+simultaneously and picks the best result via tournament selection.
 
-  - minimal_fix: change only the failing line(s)
-  - restructure: rewrite the core algorithm keeping the same interface
-  - add_guards: add input validation and edge-case guards
+The three strategies are:
+  1. minimal_fix   — change only the failing line(s); minimal diff
+  2. restructure   — rewrite the core algorithm from scratch; same interface
+  3. add_guards    — add input validation and edge-case guards
 
-Each parallel branch (fan_out_repairs → Send → parallel_generate) generates
-a repair candidate and immediately executes it against both test suites.
-The select_best_repair node picks the winner using tournament selection:
+WHY THREE STRATEGIES?
+----------------------
+Different failure modes respond better to different repair approaches:
+  - A logic error in one branch → minimal_fix is best (surgical change)
+  - A fundamentally wrong algorithm → restructure is best (start fresh)
+  - An edge case (empty input, None, boundary) → add_guards is best (defensive code)
 
-  Score = (both_pass, spec_pass, -(spec_failures + adv_failures))
+Running all three in parallel means we almost always have at least one
+strategy that's appropriate, without needing the debugger to correctly
+predict which one to use.
 
-Design decision: fan-out is implemented with LangGraph Send() so branches
-run concurrently. The parallel_repairs field uses Annotated[list, operator.add]
-so each branch appends its result without coordination. select_best_repair
-reads the merged list and picks the winner.
+LANGGRAPH SEND() FAN-OUT
+------------------------
+fan_out_repairs() returns a list of ``Send("parallel_generate", {...})``
+objects. LangGraph interprets a list of Send objects as a concurrent fan-out:
+it launches all of them simultaneously, collects their results in
+state["parallel_repairs"] (merged via operator.add reducer), then proceeds
+to select_best_repair when ALL branches complete.
 
-Falls back gracefully when parallel_strategies=False — the graph wires
-generate_solution directly as before.
+TOURNAMENT SELECTION
+--------------------
+select_best_repair ranks candidates by:
+  (both_pass, spec_pass, -total_failures)
+
+This prioritizes full correctness (both suites pass) > spec correctness >
+fewest failures. The winner's code becomes current_code for the next iteration.
+
+WHEN IS THIS DISABLED?
+-----------------------
+config.parallel_strategies defaults to False. It triples LLM cost per repair
+iteration and adds complexity to the graph topology. Only enable it if you
+have budget and the serial repair loop is getting stuck.
 """
 
 import logging
@@ -35,7 +58,10 @@ from llm.router import LLMRouter
 
 logger = logging.getLogger(__name__)
 
-# The three repair strategies offered to the LLM in parallel
+# The three strategies injected as instruction constraints into the repair prompt.
+# Each strategy constrains HOW the generator should repair the code — the base
+# diagnosis (root_cause, repair_strategy from diagnose_failure) is also included
+# so each branch still has the debugger's guidance.
 _STRATEGIES = [
     {
         "name": "minimal_fix",
@@ -53,11 +79,20 @@ _STRATEGIES = [
 
 
 def fan_out_repairs(state: AgentState) -> list[Send]:
-    """
-    LangGraph conditional edge: fan out to parallel_generate with different strategies.
+    """LangGraph conditional edge: create parallel repair branches via Send().
 
-    Returns a list of Send() objects — one per strategy. LangGraph executes
-    them concurrently; results accumulate via the parallel_repairs reducer.
+    Called by _route_after_increment_parallel when iteration < max_iterations.
+    Returns a list of Send objects — LangGraph runs them concurrently.
+
+    Each Send carries a copy of the current state with two overrides:
+      - repair_strategy: original diagnosis + strategy-specific constraint
+      - strategy_name:   which strategy this branch is running
+
+    Args:
+        state: Current AgentState. Used to build the per-branch state dicts.
+
+    Returns:
+        List of Send("parallel_generate", modified_state) objects, one per strategy.
     """
     logger.info(
         "Fanning out %d parallel repair strategies (iteration=%d)",
@@ -69,12 +104,17 @@ def fan_out_repairs(state: AgentState) -> list[Send]:
             "parallel_generate",
             {
                 **state,
+                # Augment the base repair_strategy with the strategy-specific
+                # instruction. The generator sees BOTH the debugger's diagnosis
+                # AND the strategy constraint in its prompt.
                 "repair_strategy": (
                     f"{state.get('repair_strategy', '')}\n\n"
                     f"Approach constraint: {s['instruction']}"
                 ),
                 "strategy_name": s["name"],
-                # Reset parallel_repairs so each branch starts clean
+                # Reset parallel_repairs in each branch's state copy so each
+                # branch starts with an empty list. The operator.add reducer
+                # then merges all branches' [candidate] lists into one.
                 "parallel_repairs": [],
             },
         )
@@ -86,11 +126,19 @@ async def parallel_generate(
     state: AgentState,
     router: LLMRouter,
 ) -> dict[str, Any]:
-    """
-    LangGraph node: generate one repair candidate and execute it.
+    """LangGraph node: generate one repair candidate and immediately test it.
 
-    Runs as a parallel branch launched by fan_out_repairs → Send().
-    Appends its result to parallel_repairs for select_best_repair to evaluate.
+    Runs as a parallel branch, launched by fan_out_repairs()'s Send() objects.
+    Each branch generates repair code and tests it, then appends one candidate
+    dict to parallel_repairs (via operator.add — no coordination needed).
+
+    Args:
+        state:  Branch's state dict (copy of AgentState with strategy overrides).
+        router: LLMRouter. Uses ``generator`` role → weak model (HF/Ollama).
+
+    Returns:
+        Partial state: {"parallel_repairs": [candidate_dict], "events": [...]}.
+        The single-element list is merged with other branches via operator.add.
     """
     iteration = state.get("iteration", 0)
     strategy_name = state.get("strategy_name", "unknown")
@@ -101,7 +149,8 @@ async def parallel_generate(
         iteration=iteration,
     ).to_dict())
 
-    # Generate repair using the strategy-augmented prompt
+    # Build repair variables — same as generate_solution's repair template,
+    # but repair_strategy has the strategy-specific instruction appended.
     learning_log = _format_learning_log(state.get("learning_log", []))
     variables = {
         "task_description": state["task_description"],
@@ -121,6 +170,8 @@ async def parallel_generate(
         )
         candidate_code = result["code"]
     except Exception as exc:
+        # If this branch fails to generate code (schema error, timeout, etc.),
+        # fall back to the current code so we still have a candidate to score.
         logger.warning(
             "parallel_generate '%s' failed at generation: %s", strategy_name, exc
         )
@@ -132,7 +183,9 @@ async def parallel_generate(
         explanation=f"Strategy: {strategy_name}",
     ).to_dict())
 
-    # Execute against both test suites
+    # ── Test the candidate immediately in this branch ─────────────────────────
+    # Each branch runs its own test suite in the sandbox so select_best_repair
+    # has real test results to compare, not just the code itself.
     spec_test_code = state.get("spec_test_code", "")
     adversarial_test_code = state.get("current_test_code", "")
 
@@ -162,6 +215,7 @@ async def parallel_generate(
         iteration=iteration,
     ).to_dict())
 
+    # Build the candidate record that select_best_repair will score
     candidate = {
         "strategy_name": strategy_name,
         "code": candidate_code,
@@ -171,38 +225,49 @@ async def parallel_generate(
         "adv_failures": adv_failures,
     }
 
+    # Return a single-element list. The operator.add reducer in AgentState
+    # concatenates all branches' lists: [[c1], [c2], [c3]] → [c1, c2, c3].
     return {
-        "parallel_repairs": [candidate],  # appended via operator.add reducer
+        "parallel_repairs": [candidate],
         "events": events,
     }
 
 
 def select_best_repair(state: AgentState) -> dict[str, Any]:
-    """
-    LangGraph node: tournament selection across parallel repair candidates.
+    """LangGraph node: tournament selection across parallel repair candidates.
 
-    Scoring (higher = better):
-      1. Both spec and adversarial tests pass
-      2. Spec tests pass (correctness first)
-      3. Fewest total failures
+    Runs after ALL parallel_generate branches complete (LangGraph waits for
+    all incoming edges before running a fan-in node).
 
-    The winning candidate's code replaces current_code.
-    parallel_repairs is reset to [] so the next iteration starts fresh.
+    Scoring (lexicographic, higher = better):
+      1. both_pass: both spec AND adversarial tests pass (1 > 0)
+      2. spec_pass: at least spec tests pass (1 > 0)
+      3. -total_failures: fewer failures is better
+
+    Args:
+        state: Current AgentState. Reads parallel_repairs (merged list).
+
+    Returns:
+        Partial state: current_code (winner), last_execution_passed,
+                       strategy_name (winner's), parallel_repairs (cleared).
     """
     candidates = state.get("parallel_repairs", [])
 
     if not candidates:
+        # Should not happen — all 3 branches always produce a candidate —
+        # but handle gracefully just in case.
         logger.warning("select_best_repair: no candidates — keeping current code")
         return {"parallel_repairs": []}
 
     def _score(c: dict) -> tuple:
         both = c.get("spec_passed", False) and c.get("adv_passed", False)
         spec = c.get("spec_passed", False)
+        # Negative total failures — fewer failures = higher (less negative) score
         failures = -(c.get("spec_failures", 0) + c.get("adv_failures", 0))
         return (both, spec, failures)
 
     candidates_sorted = sorted(candidates, key=_score, reverse=True)
-    best = candidates_sorted[0]
+    best = candidates_sorted[0]  # highest-scoring candidate
 
     logger.info(
         "Tournament selection: winner='%s' spec=%s adv=%s (from %d candidates)",
@@ -218,12 +283,12 @@ def select_best_repair(state: AgentState) -> dict[str, Any]:
         "current_code": best["code"],
         "last_execution_passed": overall_passed,
         "strategy_name": best["strategy_name"],
-        # Reset for next iteration
-        "parallel_repairs": [],
+        "parallel_repairs": [],  # reset for the next iteration
     }
 
 
 def _format_learning_log(lessons: list[str]) -> str:
+    """Format lesson list as bullet points for prompt injection."""
     if not lessons:
         return "No prior lessons recorded."
     return "\n".join(f"- {lesson}" for lesson in lessons)

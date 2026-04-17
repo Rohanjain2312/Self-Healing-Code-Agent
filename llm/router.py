@@ -381,16 +381,34 @@ class LLMRouter:
 
 
 def build_router_with_generator_override() -> "LLMRouter":
-    """
-    Build router where generator uses a local weak model, all other roles use Claude.
+    """Build a router where the generator role uses a local weak model and
+    all other roles use Claude.
 
-    Detection order:
-      1. LLM_PROVIDER=huggingface  -> HuggingFaceProvider for generator
-      2. Ollama reachable           -> OllamaProvider for generator
-      3. Neither                    -> default router, all roles use Claude
+    This is the *intended* production routing for the project: the generator
+    is intentionally weak (Llama-3.2-3B via HF or Llama-3.2-3B via Ollama) so
+    the diagnose → repair loop is exercised meaningfully on most tasks. Claude
+    handles the smarter roles where a strong model materially improves output:
+    QA (adversarial test design), debugger (root-cause analysis), critic
+    (correctness review), and memory_summarizer (lesson distillation).
+
+    Detection order for the generator override:
+      1. ``LLM_PROVIDER=huggingface`` env var → use HuggingFaceProvider
+         (this is the path used on HF Spaces — MUST be set as a Variable on
+         the Space or the generator silently falls through to Claude).
+      2. Ollama reachable on localhost → use OllamaProvider with the model
+         in ``OLLAMA_GENERATOR_MODEL`` (default ``llama3.2:3b``).
+      3. Neither available → fall through to a plain LLMRouter with no role
+         overrides; ALL roles (including generator) use Claude.
+
+    The third case is the silent-fallback that causes the "I deployed to HF
+    Spaces and the agent always succeeds on iteration 0" symptom — Claude is
+    too good at the example tasks to trigger the repair loop. Always check
+    the log line below to confirm which branch was taken.
     """
     import os
 
+    # Default provider for the smart roles. Falls back to the auto-resolved
+    # provider (which may be Mock) if the Anthropic SDK / API key is missing.
     try:
         from .providers.anthropic_provider import AnthropicProvider
         default_provider = AnthropicProvider()
@@ -400,32 +418,53 @@ def build_router_with_generator_override() -> "LLMRouter":
 
     env_provider = os.environ.get("LLM_PROVIDER", "").lower()
 
-    # HF Spaces path
+    # Make the routing decision visible in logs — when debugging an HF Space
+    # this is the first line to grep for. Print the env signals we considered,
+    # so you can immediately see whether LLM_PROVIDER was set at all.
+    logger.info(
+        "build_router_with_generator_override: env LLM_PROVIDER=%r, "
+        "ANTHROPIC_API_KEY=%s, default_provider=%s/%s",
+        env_provider or "(unset)",
+        "set" if os.environ.get("ANTHROPIC_API_KEY") else "missing",
+        default_provider.provider_name,
+        default_provider.model_name,
+    )
+
+    # ── Branch 1: HF Spaces ──────────────────────────────────────────────
+    # The Space's "Variables" panel must include LLM_PROVIDER=huggingface
+    # for this branch to be taken. transformers + torch are imported lazily
+    # inside HuggingFaceProvider so this is cheap when the env var is unset.
     if env_provider == "huggingface":
         try:
             from .providers.hf_provider import HuggingFaceProvider
             generator_provider = HuggingFaceProvider()
             logger.info(
-                "Generator role -> HuggingFaceProvider model=%s | Other roles -> %s",
-                generator_provider.model_name, default_provider.provider_name,
+                "Generator -> HuggingFaceProvider(%s) | Other roles -> %s(%s)",
+                generator_provider.model_name,
+                default_provider.provider_name, default_provider.model_name,
             )
             return LLMRouter(
                 provider=default_provider,
                 role_providers={"generator": generator_provider},
             )
         except Exception as exc:
+            # Don't crash the Space if the HF model can't load — fall through
+            # to the all-Claude router so the rest of the agent still works.
             logger.warning("HuggingFaceProvider failed (%s), generator uses default.", exc)
             return LLMRouter(provider=default_provider)
 
-    # Local MacBook path
+    # ── Branch 2: Local MacBook with Ollama ─────────────────────────────
+    # The sync health-check uses httpx's sync client so this is safe to call
+    # at router construction time even if an event loop is already running.
     try:
         from .providers.ollama_provider import OllamaProvider
         generator_model = os.environ.get("OLLAMA_GENERATOR_MODEL", "llama3.2:3b")
         ollama = OllamaProvider(model=generator_model)
         if ollama.is_available_sync():
             logger.info(
-                "Generator role -> OllamaProvider model=%s | Other roles -> %s",
-                generator_model, default_provider.provider_name,
+                "Generator -> OllamaProvider(%s) | Other roles -> %s(%s)",
+                generator_model,
+                default_provider.provider_name, default_provider.model_name,
             )
             return LLMRouter(
                 provider=default_provider,
@@ -435,4 +474,14 @@ def build_router_with_generator_override() -> "LLMRouter":
     except Exception as exc:
         logger.warning("Ollama check failed (%s), generator uses default.", exc)
 
+    # ── Branch 3: Silent fallback — all roles use Claude ────────────────
+    # If you hit this branch on HF Spaces it means LLM_PROVIDER was not set
+    # as a Variable. The agent will still work but every role uses Claude
+    # so the repair loop will rarely trigger.
+    logger.warning(
+        "No generator override applied — ALL roles will use %s. "
+        "Set LLM_PROVIDER=huggingface (HF Spaces) or run Ollama locally to "
+        "enable the small-model generator and the self-healing repair loop.",
+        default_provider.provider_name,
+    )
     return LLMRouter(provider=default_provider)

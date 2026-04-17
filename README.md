@@ -58,19 +58,26 @@ An autonomous agent that generates Python code, adversarially tests it with edge
 ### Prerequisites
 
 - Python 3.11+
-- Ollama running locally (`ollama serve`) with `llama3` pulled
+- `ANTHROPIC_API_KEY` — required for all non-generator roles (QA, debugger, critic, memory summarizer)
+- Ollama running locally (`ollama serve`) — optional, used only for the generator role
 
 ```bash
 pip install -r requirements.txt
-ollama pull llama3
-python app.py
+# Option 1: Ollama generator + Claude for smart roles (recommended locally)
+ollama pull llama3.2:3b
+ANTHROPIC_API_KEY=sk-ant-... python app.py
+
+# Option 2: All roles use Claude (no Ollama needed; repair loop triggers less often)
+LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... python app.py
 ```
 
-### With HuggingFace Transformers (GPU)
+### With HuggingFace Transformers (HF Spaces / GPU)
 
 ```bash
 pip install transformers torch accelerate
-LLM_PROVIDER=huggingface python app.py
+# LLM_PROVIDER=huggingface is REQUIRED to route the generator role to the local 3B model.
+# Without it, the generator silently falls back to Claude (repair loop rarely triggers).
+LLM_PROVIDER=huggingface ANTHROPIC_API_KEY=sk-ant-... python app.py
 ```
 
 ### Mock mode (no models required)
@@ -121,9 +128,11 @@ This is where actual autonomous multi-step reasoning happens — the LLM decides
 ### Layer 3: Human Oversight (configurable autonomy)
 
 Configurable via `AgentConfig.autonomy_level`:
-- `full_auto` (default): no interrupts — fully autonomous repair loop
-- `review_repairs`: pause before each repair for human approval via `interrupt()`
+- `review_repairs` (default): pause before each repair for human approval via `interrupt()`
+- `full_auto`: no interrupts — fully autonomous repair loop (used by the HF Spaces deployment, set in `app.py`)
 - `review_all`: pause before generation AND before each repair
+
+> The HF Spaces entry point (`app.py` at the repo root) explicitly overrides this to `full_auto` because LangGraph's `interrupt()` pause/resume flow can desynchronize with Gradio's streaming generator on hosted deployments.
 
 ```
 [generate_spec_tests]  ← once (spec-blind oracle tests, if enabled)
@@ -261,13 +270,15 @@ tests/          Pytest test suite (mock provider, no GPU needed)
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_PROVIDER` | auto | `ollama` \| `huggingface` \| `mock` |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Ollama model name |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `HF_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | HuggingFace model ID |
-| `USE_4BIT` | unset | Enable 4-bit quantization |
-| `LANGCHAIN_TRACING_V2` | unset | Enable LangSmith tracing |
-| `LANGCHAIN_API_KEY` | unset | LangSmith API key |
-| `LANGCHAIN_PROJECT` | `self-healing-agent` | LangSmith project name |
+| Variable | Required? | Default | Description |
+|----------|-----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | **Required** | — | Anthropic API key for Claude. All non-generator roles (QA, debugger, critic, memory summarizer) use Claude. Without this key the agent falls back to Mock. |
+| `LLM_PROVIDER` | Required for HF Spaces | auto | `huggingface` \| `ollama` \| `anthropic` \| `mock`. Set to `huggingface` on HF Spaces to route the generator to the local 3B model. |
+| `OLLAMA_GENERATOR_MODEL` | Optional | `llama3.2:3b` | Ollama model used for the generator role when Ollama is reachable. |
+| `OLLAMA_BASE_URL` | Optional | `http://localhost:11434` | Ollama server URL |
+| `HF_MODEL` | Optional | `meta-llama/Llama-3.2-3B-Instruct` | HuggingFace model ID for the generator role |
+| `HF_TOKEN` | Optional | — | HuggingFace token for cross-session lesson persistence to a HF Dataset |
+| `USE_4BIT` | Optional | unset | Enable 4-bit quantization for the HF generator (requires bitsandbytes) |
+| `LANGCHAIN_TRACING_V2` | Optional | unset | Enable LangSmith tracing |
+| `LANGCHAIN_API_KEY` | Optional | unset | LangSmith API key |
+| `LANGCHAIN_PROJECT` | Optional | `self-healing-agent` | LangSmith project name |
