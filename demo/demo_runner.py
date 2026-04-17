@@ -329,11 +329,18 @@ async def run_demo_async(
                         # sees the timeline grow line by line, not in big batches.
                         yield (state.timeline_text(), state.code_text(), state.lessons_text())
 
-            # After processing each node's output, check whether the graph paused.
-            # graph.get_state().next is non-empty when interrupt() was called and
-            # the graph is waiting for a Command(resume=...).
+            # Check whether the graph actually paused on an interrupt().
+            # IMPORTANT: current.next is non-empty between ANY two nodes during
+            # normal execution — it just means "next node to run". We must check
+            # for actual Interrupt objects on the tasks to distinguish a real
+            # interrupt() call from a normal mid-graph checkpoint.
             current = app.get_state(thread_config)
-            if current.next:
+            interrupted = bool(
+                current.next
+                and current.tasks
+                and any(getattr(t, "interrupts", None) for t in current.tasks)
+            )
+            if interrupted:
                 # Extract the interrupt payload — contains the HITL review info
                 try:
                     payload = current.tasks[0].interrupts[0].value
@@ -420,9 +427,15 @@ async def resume_demo_async(
                         state.apply_event(event)
                         yield (state.timeline_text(), state.code_text(), state.lessons_text())
 
-            # Check for another interrupt (another repair iteration needing review)
+            # Check for another interrupt (another repair iteration needing review).
+            # Same guard as run_demo_async: must check for actual Interrupt objects,
+            # not just current.next (which is non-empty between any two nodes).
             current = app.get_state(thread_config)
-            if current.next:
+            if (
+                current.next
+                and current.tasks
+                and any(getattr(t, "interrupts", None) for t in current.tasks)
+            ):
                 try:
                     payload = current.tasks[0].interrupts[0].value
                 except (IndexError, AttributeError):
