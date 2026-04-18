@@ -146,6 +146,12 @@ def parse_and_validate(raw_text: str, schema: dict) -> dict[str, Any]:
                 raw_text=raw_text,
             ) from exc
 
+    # Unwrap ReAct final_diagnosis wrapper: {"action": "final_diagnosis", "root_cause": ...}
+    # The debugger uses this format in get_raw_response but call_with_fallback expects
+    # the flat schema. Silently strip the action field so validation succeeds.
+    if isinstance(parsed, dict) and parsed.get("action") == "final_diagnosis":
+        parsed = {k: v for k, v in parsed.items() if k != "action"}
+
     if schema:
         # Attempt coercion before validation so type mismatches don't burn retries
         parsed = _coerce_parsed(parsed, schema)
