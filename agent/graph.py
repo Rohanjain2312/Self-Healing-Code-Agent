@@ -168,7 +168,7 @@ def _route_after_critic(
 
 def _route_after_diagnosis(
     state: AgentState,
-) -> Literal["update_learning_log", "generate_solution"]:
+) -> Literal["update_learning_log", "increment_iteration"]:
     """Confidence-aware routing after the debugger's ReAct loop (Fix 7).
 
     WHY THIS MATTERS:
@@ -178,20 +178,25 @@ def _route_after_diagnosis(
     wrong direction for multiple iterations. It's better to regenerate from
     scratch (blind retry) than to confidently do the wrong repair.
 
-    High confidence (≥ 0.3) → update learning log → repair with the diagnosis.
-    Low confidence (< 0.3)  → skip learning log → regenerate from scratch.
+    High confidence (≥ 0.3) → update learning log → increment → repair with the diagnosis.
+    Low confidence (< 0.3)  → skip learning log → increment → regenerate from scratch.
+
+    IMPORTANT: Both paths must go through increment_iteration. Previously the low-
+    confidence path jumped directly to "generate_solution", bypassing increment_iteration
+    entirely. This left state["iteration"] at 0 forever, causing the max_iterations check
+    in _route_after_execution to never trigger — infinite loop on persistent failures.
     """
     confidence = state.get("diagnosis_confidence", 1.0)
     if confidence < _LOW_CONFIDENCE_THRESHOLD:
         logger.info(
-            "Low diagnosis confidence (%.2f < %.2f) — routing to blind retry.",
+            "Low diagnosis confidence (%.2f < %.2f) — routing to blind retry via increment.",
             confidence,
             _LOW_CONFIDENCE_THRESHOLD,
         )
-        # Skip update_learning_log — a wrong diagnosis doesn't produce useful
-        # lessons. Jump straight back to generate_solution which will see the
-        # original task_description + existing learning_log.
-        return "generate_solution"
+        # Skip update_learning_log (a wrong diagnosis produces no useful lessons),
+        # but MUST go through increment_iteration to advance the counter and
+        # allow _route_after_increment to terminate at max_iterations.
+        return "increment_iteration"
     return "update_learning_log"
 
 
@@ -369,7 +374,7 @@ def build_graph(
         _route_after_diagnosis,
         {
             "update_learning_log": "update_learning_log",  # confident → use diagnosis
-            "generate_solution": "generate_solution",       # not confident → retry fresh
+            "increment_iteration": "increment_iteration",  # not confident → retry via increment
         },
     )
 
