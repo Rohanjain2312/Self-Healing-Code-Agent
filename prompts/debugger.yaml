@@ -85,7 +85,7 @@ templates:
 
     Identify the exact failure mechanism and the precise code change needed to fix it.
 
-    IMPORTANT: Tool use is NOT available for this call. Do NOT output {"action": "use_tool", ...} format.
+    IMPORTANT: Tool use is NOT available for this call. Do NOT output {{"action": "use_tool", ...}} format.
     You MUST output ONLY the flat diagnosis JSON below — no "action" field, no tool calls, no extra text.
 
     Respond with ONLY this JSON object (no other text, no action field):
