@@ -311,30 +311,31 @@ async def run_demo_async(
 
     try:
         # astream yields {node_name: partial_state} as each node completes.
-        async for state_update in app.astream(initial_state, thread_config):
-            for node_name, node_state in state_update.items():
-                if not isinstance(node_state, dict):
-                    continue  # skip non-dict updates (metadata, __interrupt__ tags)
+        async for _state_update in app.astream(initial_state, thread_config):
+            # Read from the canonical merged state rather than the partial node
+            # update. Reason: parallel nodes (generate_spec_tests + generate_solution)
+            # each emit separate partial updates whose individual events lists don't
+            # compose correctly with total_seen — the second parallel node's events
+            # always appear at positions already past the slice window. Using
+            # get_state() after each batch gives us the correctly deduplicated
+            # canonical list (the _merge_events reducer in state.py prevents
+            # operator.add duplication).
+            current = app.get_state(thread_config)
+            canonical_events = current.values.get("events", [])
+            new_events = canonical_events[total_seen:]
+            total_seen = len(canonical_events)
 
-                # Extract only new events using our cursor
-                events = node_state.get("events", [])
-                new_events = events[total_seen:]
-                total_seen = len(events)   # advance cursor for next iteration
-
-                for event in new_events:
-                    if isinstance(event, dict):
-                        state.apply_event(event)
-                        # Yield on every event so Gradio updates in real time.
-                        # This produces fine-grained streaming updates — the user
-                        # sees the timeline grow line by line, not in big batches.
-                        yield (state.timeline_text(), state.code_text(), state.lessons_text())
+            for event in new_events:
+                if isinstance(event, dict):
+                    state.apply_event(event)
+                    # Yield on every event so Gradio updates in real time.
+                    yield (state.timeline_text(), state.code_text(), state.lessons_text())
 
             # Check whether the graph actually paused on an interrupt().
             # IMPORTANT: current.next is non-empty between ANY two nodes during
             # normal execution — it just means "next node to run". We must check
             # for actual Interrupt objects on the tasks to distinguish a real
             # interrupt() call from a normal mid-graph checkpoint.
-            current = app.get_state(thread_config)
             interrupted = bool(
                 current.next
                 and current.tasks
@@ -413,24 +414,23 @@ async def resume_demo_async(
         # Command(resume=decision) restores the pickled graph state from the
         # checkpointer, injects decision as the return value of interrupt(),
         # and continues executing from the review_repair node.
-        async for state_update in app.astream(Command(resume=decision), thread_config):
-            for node_name, node_state in state_update.items():
-                if not isinstance(node_state, dict):
-                    continue
+        async for _state_update in app.astream(Command(resume=decision), thread_config):
+            # Same canonical-state approach as run_demo_async: use get_state()
+            # rather than partial node updates to correctly handle parallel nodes
+            # and avoid the duplicate-event misalignment.
+            current = app.get_state(thread_config)
+            canonical_events = current.values.get("events", [])
+            new_events = canonical_events[total_seen:]
+            total_seen = len(canonical_events)
 
-                events = node_state.get("events", [])
-                new_events = events[total_seen:]
-                total_seen = len(events)
-
-                for event in new_events:
-                    if isinstance(event, dict):
-                        state.apply_event(event)
-                        yield (state.timeline_text(), state.code_text(), state.lessons_text())
+            for event in new_events:
+                if isinstance(event, dict):
+                    state.apply_event(event)
+                    yield (state.timeline_text(), state.code_text(), state.lessons_text())
 
             # Check for another interrupt (another repair iteration needing review).
             # Same guard as run_demo_async: must check for actual Interrupt objects,
             # not just current.next (which is non-empty between any two nodes).
-            current = app.get_state(thread_config)
             if (
                 current.next
                 and current.tasks

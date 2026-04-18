@@ -41,6 +41,36 @@ import operator
 from typing import Annotated, Any, TypedDict
 
 
+def _merge_events(existing: list, new: list) -> list:
+    """Dedup-aware reducer for the events list.
+
+    Each node reads ``state["events"]``, appends its new events, and returns
+    the full list. With a plain ``operator.add`` reducer this DOUBLES the list
+    on every serial node (existing + returned = existing + existing + new).
+    This reducer only appends events that aren't already present, identified by
+    the (type, timestamp) pair which is unique per event construction.
+
+    The parallel fan-out (generate_spec_tests + generate_solution) is still
+    handled correctly: both start from events=[], so their contributions are
+    disjoint and both are added without duplicates.
+    """
+    if not existing:
+        return list(new)
+    existing_keys = {
+        (e.get("type"), e.get("timestamp"))
+        for e in existing
+        if isinstance(e, dict)
+    }
+    result = list(existing)
+    for ev in new:
+        if isinstance(ev, dict):
+            key = (ev.get("type"), ev.get("timestamp"))
+            if key not in existing_keys:
+                result.append(ev)
+                existing_keys.add(key)
+    return result
+
+
 class IterationRecord(TypedDict):
     """Snapshot of a single generate → test → diagnose → repair cycle.
 
@@ -194,7 +224,7 @@ class AgentState(TypedDict):
 
     # ── Event stream ──────────────────────────────────────────────────────────
 
-    events: Annotated[list[dict[str, Any]], operator.add]
+    events: Annotated[list[dict[str, Any]], _merge_events]
     # Chronological list of event dicts emitted by every node. The Gradio UI
     # (demo/demo_runner.py) reads this list and converts each event to a
     # timeline entry, a code snapshot, or a learning-log update.

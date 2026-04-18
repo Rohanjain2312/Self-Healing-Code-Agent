@@ -64,6 +64,8 @@ def format_event_for_timeline(event: dict[str, Any]) -> str:
     event_type = event.get("type", "unknown")
     iteration = event.get("iteration", 0)
     payload = event.get("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
 
     n = iteration  # short alias for f-strings
 
