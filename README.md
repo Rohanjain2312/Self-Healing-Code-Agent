@@ -15,6 +15,8 @@ short_description: Autonomous agent that self-heals Python code errors.
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.3+-orange)](https://github.com/langchain-ai/langgraph)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
+> **37% → 87% on the benchmark below, with no change to the model.** The repair loop, confidence-aware routing, and model-per-role decisions behind that gap are written up in [Harness Engineering: The Part of the Agent That's Actually Yours](https://medium.com/@rohanjain2312/harness-engineering-the-part-of-the-agent-thats-actually-yours-ede9e85e4498).
+> 
 ---
 
 ## About
